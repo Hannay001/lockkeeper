@@ -1265,35 +1265,48 @@ class ContextSavingsBenchmarkTest(IsolatedRegistryTest):
     def _load_benchmark():
         return importlib.import_module("bench_context_savings")
 
-    def _write_skill(self, root: Path, name: str, description: str) -> None:
-        directory = root / name
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: {description}\n---\nBody for {name}.\n",
-            encoding="utf-8",
-        )
+    def _records(self, *skills: tuple[str, str]) -> list[dict]:
+        """Registry records pointing at real bodies, without touching discovery.
 
-    def _build_index(self, *skills: tuple[str, str]) -> None:
-        skill_root = self.home / ".claude" / "skills"
+        Skill discovery resolves roots through Path.home(), which follows
+        USERPROFILE on Windows and HOME elsewhere, so building the index from
+        fixture files on disk is not portable. Feeding records straight to the
+        benchmark keeps the real bundle() logic under test on every platform.
+        """
+        root = self.temp / "bench-bodies"
+        root.mkdir(parents=True, exist_ok=True)
+        records = []
         for name, description in skills:
-            self._write_skill(skill_root, name, description)
-        with contextlib.redirect_stdout(io.StringIO()):
-            registry.refresh_runtime_snapshots()
-            registry.rebuild(registry.ROUTER_CONFIG.output_dir, quiet=True)
+            body = root / f"{name}.md"
+            body.write_text(f"# {name}\n\nBody for {name}.\n", encoding="utf-8")
+            records.append(
+                {
+                    "id": f"skill:{name}",
+                    "name": name,
+                    "type": "skill",
+                    "description": description,
+                    "category": "research-knowledge",
+                    "status": "active",
+                    "runtimes": ["claude"],
+                    "source_path": str(body),
+                    "registration_count": 1,
+                    "owner": "",
+                    "tags": [],
+                }
+            )
+        return records
 
     def test_benchmark_skips_tasks_that_route_nothing(self) -> None:
-        self.configure(
-            output_dir=self.temp / "bench-output",
-            snapshot_dir=self.temp / "bench-state" / "snapshots",
-        )
-        self._build_index(
+        self.configure(output_dir=self.temp / "bench-output")
+        benchmark = self._load_benchmark()
+        records = self._records(
             ("payment-auditor", "audit payment webhooks and idempotency for race conditions"),
         )
-        benchmark = self._load_benchmark()
 
-        report = benchmark.run("claude")
+        with mock.patch.object(registry, "load_registry", return_value=records):
+            report = benchmark.run("claude")
 
-        self.assertTrue(report["rows"], "at least one task should route with a matching skill")
+        self.assertTrue(report["rows"], "the matching task should still route")
         self.assertTrue(report["skipped_tasks"], "unmatched tasks should be skipped, not crash")
         self.assertEqual(
             len(report["rows"]) + len(report["skipped_tasks"]),
@@ -1305,15 +1318,12 @@ class ContextSavingsBenchmarkTest(IsolatedRegistryTest):
         self.assertIn("skipped", rendered.getvalue())
 
     def test_benchmark_reports_an_actionable_error_on_an_empty_index(self) -> None:
-        self.configure(
-            output_dir=self.temp / "bench-empty-output",
-            snapshot_dir=self.temp / "bench-empty-state" / "snapshots",
-        )
-        self._build_index()
+        self.configure(output_dir=self.temp / "bench-empty-output")
         benchmark = self._load_benchmark()
 
-        with self.assertRaises(SystemExit) as raised:
-            benchmark.run("claude")
+        with mock.patch.object(registry, "load_registry", return_value=[]):
+            with self.assertRaises(SystemExit) as raised:
+                benchmark.run("claude")
 
         self.assertIn("index looks empty", str(raised.exception))
 
