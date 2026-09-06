@@ -6,6 +6,7 @@ registry outputs, links, configuration files, and home-like paths are temporary.
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import importlib
 import io
@@ -1326,6 +1327,114 @@ class ContextSavingsBenchmarkTest(IsolatedRegistryTest):
                 benchmark.run("claude")
 
         self.assertIn("index looks empty", str(raised.exception))
+
+
+class DegradedRouterVisibilityTest(IsolatedRegistryTest):
+    """Routing must answer under sandbox restrictions, and say when it degrades.
+
+    Two regressions, both reported from real agent sessions:
+
+    - A sandboxed agent (macOS seatbelt returns EPERM, not EACCES) could not open
+      the shared refresh lock, the PermissionError escaped uncaught, and the query
+      returned no bundle at all.
+    - Auto-heal rebuilds move the registry fingerprint, which invalidates every
+      semantic vector. Ranking silently dropped to lexical-only with no signal, so
+      the degradation was invisible unless someone happened to run `check`.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        registry._EMITTED_WARNINGS.clear()
+        self.addCleanup(registry._EMITTED_WARNINGS.clear)
+
+    def _force_stale(self) -> None:
+        def stale(output, deep=False):
+            raise RuntimeError(
+                "Runtime configuration changed after the registry was built; "
+                "run snapshot-runtimes, then rebuild"
+            )
+
+        patcher = mock.patch.object(registry, "assert_registry_fresh", side_effect=stale)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        refreshable = mock.patch.object(registry, "auto_refreshable_staleness", return_value=True)
+        refreshable.start()
+        self.addCleanup(refreshable.stop)
+
+    def test_query_still_serves_when_the_refresh_lock_is_denied(self) -> None:
+        output = registry.ROUTER_CONFIG.output_dir
+        output.mkdir(parents=True, exist_ok=True)
+        self._force_stale()
+
+        def denied(_path):
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+        stderr = io.StringIO()
+        with mock.patch.object(registry, "open_lock_file", side_effect=denied):
+            with contextlib.redirect_stderr(stderr):
+                # Must not raise: a sandboxed agent still needs a bundle.
+                registry.ensure_query_registry_fresh(output)
+
+        self.assertIn("refresh lock is unavailable", stderr.getvalue())
+
+    def test_a_read_only_output_directory_does_not_break_queries(self) -> None:
+        output = registry.ROUTER_CONFIG.output_dir
+        output.mkdir(parents=True, exist_ok=True)
+        self._force_stale()
+        original_mode = output.stat().st_mode
+        os.chmod(output, 0o555)
+        self.addCleanup(os.chmod, output, original_mode)
+        if os.access(output, os.W_OK):
+            self.skipTest("cannot drop write permission in this environment (likely root)")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            registry.ensure_query_registry_fresh(output)
+
+        self.assertIn("refresh lock is unavailable", stderr.getvalue())
+
+    def test_a_stale_semantic_index_announces_lexical_only_ranking(self) -> None:
+        output = self.temp / "semantic-output"
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "embeddings.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": registry.SEMANTIC_SCHEMA_VERSION,
+                    "model": "test-model",
+                    "dim": 3,
+                    "count": 1,
+                    "ids": ["skill:a"],
+                    "hashes": ["deadbeef"],
+                    "registry_fingerprint": "0000000000000000aaaa",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            hits = registry.semantic_hits(output, "any query", "1111111111111111bbbb")
+
+        self.assertEqual(hits, {}, "a fingerprint mismatch must not score anything")
+        self.assertIn("lexical-only", stderr.getvalue())
+        self.assertIn("lockkeeper reindex", stderr.getvalue())
+
+    def test_degradation_notices_are_not_repeated(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            for _ in range(5):
+                registry._warn_once("ranking is degraded")
+
+        self.assertEqual(stderr.getvalue().count("ranking is degraded"), 1)
+
+    def test_notices_never_contaminate_stdout(self) -> None:
+        """JSON consumers parse stdout; warnings must not corrupt that contract."""
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            with contextlib.redirect_stderr(io.StringIO()):
+                registry._warn_once("degraded")
+
+        self.assertEqual(stdout.getvalue(), "")
 
 
 if __name__ == "__main__":

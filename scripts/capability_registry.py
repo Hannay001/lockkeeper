@@ -647,6 +647,22 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 
+_EMITTED_WARNINGS: set[str] = set()
+
+
+def _warn_once(message: str) -> None:
+    """Emit a degradation notice to stderr exactly once per process.
+
+    Routing keeps a strict stdout contract (human table or JSON), so operational
+    warnings go to stderr. Deduplicating keeps a repeated condition from turning
+    into noise inside a long-running agent session.
+    """
+    if message in _EMITTED_WARNINGS:
+        return
+    _EMITTED_WARNINGS.add(message)
+    print(f"lockkeeper: {message}", file=sys.stderr)
+
+
 def open_lock_file(lock_path: Path):
     """Open a lock file without following symlinks or truncating victims."""
     flags = os.O_RDWR | os.O_CREAT
@@ -2926,8 +2942,21 @@ def ensure_query_registry_fresh(output: Path) -> None:
         ) from initial_staleness
 
     lock_path = output / AUTO_REFRESH_LOCK_NAME
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open_lock_file(lock_path) as lock:
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open_lock_file(lock_path)
+    except OSError as lock_error:
+        # A sandboxed or read-only deployment cannot take the shared lock:
+        # macOS seatbelt denials surface as EPERM, plain read-only mounts as
+        # EACCES/EROFS. Refusing to answer would be worse than answering from
+        # the index we already have, so serve the existing registry and say so
+        # once on stderr. stdout stays exactly on contract for JSON consumers.
+        _warn_once(
+            f"registry is stale but the refresh lock is unavailable ({lock_error.strerror}); "
+            "serving the existing index without refreshing"
+        )
+        return
+    with lock_handle as lock:
         _lock_exclusive(lock)
         try:
             assert_registry_fresh(output, deep=False)
@@ -2950,6 +2979,14 @@ def ensure_query_registry_fresh(output: Path) -> None:
                 # lifecycle step (`lockkeeper link`) so machines without every harness
                 # can still route.
             assert_registry_fresh(output, deep=False)
+            # The rebuild above moved the registry fingerprint, so any existing
+            # vectors no longer match. Recovery is intentionally silent on stdout,
+            # but the resulting ranking downgrade must not be: without this the
+            # router can spend a whole session lexical-only with no signal.
+            _warn_once(
+                "registry was refreshed automatically; semantic vectors are now stale "
+                "and ranking is lexical-only until `lockkeeper reindex` runs"
+            )
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as refresh_error:
             raise RuntimeError(
                 "Automatic registry refresh failed: "
@@ -3272,6 +3309,14 @@ def semantic_hits(output: Path, query: str, fingerprint: str) -> dict[str, float
         return {}
     # Advisory freshness: vectors built against a different corpus are simply ignored.
     if fingerprint and meta.get("registry_fingerprint") not in ("", fingerprint):
+        # Silent staleness here is the failure mode operators actually hit: a
+        # rebuild (including the automatic one in ensure_query_registry_fresh)
+        # moves the fingerprint and invalidates every vector, so ranking drops
+        # to lexical-only until `lockkeeper reindex` runs. Say so once.
+        _warn_once(
+            "semantic index is stale for the current registry; ranking is lexical-only. "
+            "Run `lockkeeper reindex` to restore semantic re-ranking"
+        )
         return {}
     interpreter = output / "embedder" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     script = output / "embedder" / "embed.py"
