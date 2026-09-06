@@ -44,9 +44,16 @@ def run(runtime: str) -> dict:
     output = registry.ROUTER_CONFIG.output_dir
     records = registry.load_registry(output)
     rows = []
+    skipped = []
     for task in BENCHMARK_TASKS:
         result = registry.bundle(records, task, runtime, "", 8, output, estimate_savings=True)
-        savings = result["savings"]
+        # A sparse or freshly built index legitimately routes nothing for some
+        # tasks; bundle() then returns a warning without a savings block. Skip
+        # those instead of crashing the whole benchmark with a KeyError.
+        savings = result.get("savings")
+        if savings is None:
+            skipped.append(task)
+            continue
         rows.append(
             {
                 "task": task,
@@ -57,6 +64,13 @@ def run(runtime: str) -> dict:
                 "avoided_token_fraction": savings.get("avoided_token_fraction", 0.0),
             }
         )
+    if not rows:
+        raise SystemExit(
+            "status: error\n"
+            "summary: no benchmark task routed a capability; the index looks empty\n"
+            "next_actions: run `lockkeeper snapshot-runtimes && lockkeeper rebuild` "
+            "after installing skills, then retry"
+        )
     selected_tokens = [row["selected_body_tokens"] for row in rows]
     return {
         "runtime": runtime,
@@ -65,6 +79,7 @@ def run(runtime: str) -> dict:
         "eligible_body_tokens": rows[0]["eligible_body_tokens"],
         "median_selected_body_tokens": int(statistics.median(selected_tokens)),
         "max_selected_body_tokens": max(selected_tokens),
+        "skipped_tasks": skipped,
         "rows": rows,
     }
 
@@ -92,6 +107,11 @@ def print_table(report: dict) -> None:
         f"~{report['eligible_body_tokens']:,}. The routed bundle stays flat as the "
         f"library grows."
     )
+    if report.get("skipped_tasks"):
+        print(
+            f"\nskipped {len(report['skipped_tasks'])} task(s) with no eligible capability "
+            f"in this index: {', '.join(report['skipped_tasks'])}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
