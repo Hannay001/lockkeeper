@@ -1200,5 +1200,57 @@ class ContextSavingsHelperTest(unittest.TestCase):
         self.assertGreaterEqual(summary["avoided_body_tokens"], 0)
 
 
+class SnapshotArtifactContractTest(IsolatedRegistryTest):
+    """`snapshot-runtimes` must actually create every artifact it reports.
+
+    Regression: the Codex tool snapshot was listed in the success output but
+    only written when it already existed, so a non-seeded deployment (the
+    documented `pip install` path) left `codex-tools.json` missing and every
+    subsequent `rebuild`/`route` failed with "Required runtime snapshot is
+    missing". A seeded git clone masked the bug.
+    """
+
+    def test_snapshot_runtimes_creates_every_reported_artifact(self) -> None:
+        snapshot_dir = self.temp / "state" / "snapshots"
+        self.configure(output_dir=self.temp / "snapshot-output", snapshot_dir=snapshot_dir)
+
+        self.assertFalse(registry.TOOL_SNAPSHOT.exists())
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            registry.refresh_runtime_snapshots()
+        output = buffer.getvalue()
+
+        reported = [
+            Path(item.strip())
+            for line in output.splitlines()
+            if line.startswith("artifacts: ")
+            for item in line.removeprefix("artifacts: ").split(",")
+        ]
+        self.assertIn(registry.TOOL_SNAPSHOT, reported)
+        missing = [str(path) for path in reported if not path.is_file()]
+        self.assertEqual(missing, [], f"snapshot-runtimes reported artifacts it did not write: {missing}")
+
+        payload = json.loads(registry.TOOL_SNAPSHOT.read_text(encoding="utf-8"))
+        self.assertEqual(payload["tools"], [])
+
+    def test_snapshot_runtimes_preserves_imported_codex_tools(self) -> None:
+        snapshot_dir = self.temp / "state" / "snapshots"
+        self.configure(output_dir=self.temp / "snapshot-output-2", snapshot_dir=snapshot_dir)
+
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        existing = {
+            "schema_version": 1,
+            "captured_at": "2026-01-01T00:00:00Z",
+            "tools": [{"name": "imported_tool", "runtime": "codex"}],
+        }
+        registry.TOOL_SNAPSHOT.write_text(json.dumps(existing), encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            registry.refresh_runtime_snapshots()
+
+        payload = json.loads(registry.TOOL_SNAPSHOT.read_text(encoding="utf-8"))
+        self.assertEqual([tool["name"] for tool in payload["tools"]], ["imported_tool"])
+
+
 if __name__ == "__main__":
     unittest.main()

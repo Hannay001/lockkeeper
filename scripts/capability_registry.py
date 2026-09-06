@@ -2213,10 +2213,17 @@ def refresh_runtime_snapshots() -> None:
     plugin_count = sum(len(items) for items in plugins.values())
     if TOOL_SNAPSHOT.is_file():
         codex_tool_snapshot = load_required_json(TOOL_SNAPSHOT, REQUIRED_SNAPSHOT_SHAPES[TOOL_SNAPSHOT])
+        # Preserve previously imported Codex session tools: this command does
+        # not discover them, so rewriting the file would silently drop them.
+        snapshot_writes = []
     else:
         # First run on a fresh deployment: no imported Codex session tools yet.
+        # Materialize the empty snapshot so the reported artifact actually
+        # exists and `rebuild` works without a seeded clone (e.g. pip install).
         codex_tool_snapshot = {"schema_version": 1, "captured_at": utc_now(), "tools": []}
+        snapshot_writes = [(TOOL_SNAPSHOT, codex_tool_snapshot)]
     for path, payload in (
+        *snapshot_writes,
         (CLAUDE_MCP_SNAPSHOT, claude_snapshot),
         (CODEX_MCP_SNAPSHOT, codex_snapshot),
         (PLUGIN_SNAPSHOT, plugin_snapshot),
