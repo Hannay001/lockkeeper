@@ -195,18 +195,20 @@ Requirements: Python 3.11+, no third-party dependencies in the core path. macOS,
 
 ## Proof: your prompt stays flat as your toolbox grows
 
-The point of routing is that **a bigger library should not mean a bigger prompt.** Here is `lockkeeper route --savings` across six everyday tasks on a real machine with **58,109 eligible capabilities** (~77.7M tokens of skill bodies if you naively loaded them all):
+The point of routing is that **a bigger library should not mean a bigger prompt.** Here is `lockkeeper route --savings` across six everyday tasks on a real machine with **58,018 eligible capabilities** (~77.5M tokens of skill bodies if you naively loaded them all):
 
 | Task | Capabilities loaded | Tokens in context | Kept out of context |
 |---|--:|--:|--:|
-| migrate the auth module to a new token API | 4 | ~8,900 | 99.99% |
-| audit a payment webhook for race conditions | 4 | ~4,400 | 99.99% |
-| write unit tests for a python data pipeline | 4 | ~9,400 | 99.99% |
+| migrate the auth module to a new token API | 4 | ~8,800 | 99.99% |
+| audit a payment webhook for race conditions | 4 | ~7,400 | 99.99% |
+| write unit tests for a python data pipeline | 4 | ~3,800 | 100.00% |
 | review a react component for accessibility | 4 | ~10,400 | 99.99% |
 | debug a failing CI build on github actions | 6 | ~8,700 | 99.99% |
-| add rate limiting to a REST endpoint | 4 | ~13,800 | 99.98% |
+| add rate limiting to a REST endpoint | 4 | ~11,900 | 99.98% |
 
-Median ~9,100 skill-body tokens in context instead of ~77.7M. The routed bundle stays in the **single-digit-thousands of tokens no matter how many capabilities you install**, because selection happens *before* the prompt, not after.
+Median ~8,700 skill-body tokens in context instead of ~77.5M. The routed bundle stays in the **single-digit-thousands of tokens no matter how many capabilities you install**, because selection happens *before* the prompt, not after.
+
+The invariant is the claim, not the absolute figures. An earlier run of this same benchmark against a **5,898**-capability index produced a median of **9,164** tokens: a 10x smaller library, essentially the same prompt.
 
 Numbers are estimates (source-body bytes ÷ 4; MCP/tool connectors excluded since they are called, not read) and scale with your own library. Reproduce them on your machine:
 
