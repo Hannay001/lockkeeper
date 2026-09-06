@@ -89,8 +89,16 @@ the next feature release.
       never scans or transmits the current directory unexpectedly.
 - [x] Keep malformed `package.json` input from crashing `--check-deps`.
 - [x] Correct package metadata to `1.1.2` and modern SPDX/setuptools fields.
-- [ ] Confirm the full Linux/macOS/Windows CI and wheel smoke matrix, then tag
-      and publish `v1.1.2`.
+- [x] Fix two install-path defects found while verifying the release:
+      `snapshot-runtimes` never wrote the Codex tool snapshot on a non-seeded
+      deployment (so `pip install` left every later `rebuild`/`route`
+      failing), and the context-savings benchmark crashed on a partial index
+      (so the README proof could not be regenerated).
+- [x] Confirm the full Linux/macOS/Windows CI and wheel smoke matrix, then tag
+      and publish `v1.1.2`. Shipped 2026-09-06: 16/16 jobs green on the tag,
+      including the `release-version` guard, and the published artifact was
+      installed from `@v1.1.2` and driven through doctor → snapshot-runtimes →
+      rebuild → route plus the audit and hook firewall paths.
 
 ## v1.2 — Pre-prompt activation and measurable context budgets
 
