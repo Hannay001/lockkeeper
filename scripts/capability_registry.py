@@ -3227,20 +3227,25 @@ SEMANTIC_BUILD_TIMEOUT_SECONDS = 900
 # exactly as before.
 SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS = 30
 SEMANTIC_TOPK = 200
-# Absence from a wide top-K, when the sidecar is healthy, is evidence AGAINST a record --
-# not merely "unknown". A lexical homonym ("optimization" in a codon-design query, matching
-# Conversion Rate Optimization) can otherwise out-score a real domain match on one shared
-# word, and the additive bonus alone can never pull it back down.
+# Mere membership in a wide top-K is not necessarily evidence FOR a record. Runtime/name
+# dedup recovered all 200 distinct slots, but that also brought weak homonyms back into the
+# result set: `cro-optimization` appeared at cosine 0.587 and `postgres-patterns` at 0.601 for
+# "codon optimization protein design". Both are below the model's meaningful-evidence floor.
 #
-# Measured on the live 7,530-capability corpus with 6 labeled queries (top-8):
-#   baseline                 24 relevant, 5 collisions
-#   proportional IDF          5 relevant, 0 collisions   (destroys recall -- rejected)
-#   absence factor 0.60      25 relevant, 4 collisions
-#   absence factor 0.35      27 relevant, 1 collision    <- chosen
-#   absence factor 0.15      27 relevant, 1 collision    (no further gain)
+# Calibrated on the live 7,530-capability corpus with 6 labeled queries (top-8), holding the
+# x0.35 demotion fixed after switching to 200 DISTINCT runtime-compatible capabilities:
+#   top-K membership alone   25 relevant, 4 collisions
+#   evidence floor 0.600     27 relevant, 3 collisions
+#   evidence floor 0.610     28 relevant, 1 collision    <- chosen
+#   evidence floor 0.615     27 relevant, 0 collisions   (lower recall -- rejected)
+#   evidence floor 0.620     26 relevant, 1 collision
 #
-# Scaling rather than excluding keeps this recoverable: a strong lexical match survives
-# demotion, so a sidecar blind spot cannot erase a genuinely relevant capability.
+# This is deliberately BELOW COSINE_FLOOR: 0.61 is enough evidence to avoid a penalty, while
+# a record still needs >0.68 to earn a positive semantic bonus.
+SEMANTIC_EVIDENCE_COS = float(os.environ.get("CAPABILITY_ROUTER_EVIDENCE_COS", "0.61"))
+
+# Scaling rather than excluding keeps a strong lexical match recoverable through a sidecar
+# blind spot or low-confidence hit.
 SEMANTIC_ABSENCE_FACTOR = float(os.environ.get("CAPABILITY_ROUTER_ABSENCE_FACTOR", "0.35"))
 
 # MUST equal SCHEMA_VERSION in embedder/embed.py. It is the contract "these vectors were
@@ -3546,11 +3551,10 @@ def ranked_records(
             # to lexical-only ranking.
             if not semantic or cosine < SEMANTIC_ADMIT_COS:
                 continue
-        elif semantic and record["id"] not in semantic:
-            # The sidecar answered and did not rank this record anywhere in a top-K that
-            # spans hundreds of candidates. For a lexical homonym that is the only signal
-            # available that the shared word means something else here. Scale rather than
-            # drop, so a strong lexical match still survives a sidecar blind spot.
+        elif semantic and cosine < SEMANTIC_EVIDENCE_COS:
+            # Absence (cosine 0.0) or a low-confidence hit inside the expanded top-K is
+            # evidence against a lexical homonym. Scale rather than drop, so a strong
+            # lexical match still survives a sidecar blind spot.
             # `semantic` is empty when the sidecar is missing or stale, so this is inert
             # exactly when the router is already lexical-only.
             score *= SEMANTIC_ABSENCE_FACTOR

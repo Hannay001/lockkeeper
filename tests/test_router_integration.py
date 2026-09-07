@@ -1585,13 +1585,13 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
 
 
 class SemanticAbsenceDemotionTest(IsolatedRegistryTest):
-    """Absence from a healthy top-K demotes a lexical homonym.
+    """Weak or absent evidence from a healthy top-K demotes a lexical homonym.
 
     Reported symptom: a codon/protein query returned `cro-optimization`
     (Conversion Rate Optimization), `jpa-patterns`, and `postgres-patterns` in
-    the top 8. They matched the single word "optimization". The semantic bonus
-    is purely additive, so it could lift real matches but never push a homonym
-    down, and the model had already excluded all three from a 200-wide top-K.
+    the top 8. They matched the single word "optimization". Runtime/name dedup
+    then recovered enough distinct slots that weak homonyms entered the top-K,
+    so demotion must use an evidence floor rather than membership alone.
     """
 
     def _corpus(self) -> list[dict]:
@@ -1661,6 +1661,32 @@ class SemanticAbsenceDemotionTest(IsolatedRegistryTest):
         self.assertLess(actual, undemoted, "an absent homonym must be demoted below its lexical score")
         self.assertAlmostEqual(actual, undemoted * registry.SEMANTIC_ABSENCE_FACTOR, places=6)
 
+    def test_low_cosine_hit_inside_the_expanded_topk_is_still_demoted(self) -> None:
+        """Recovering 200 unique slots must not turn weak homonyms into evidence.
+
+        Runtime/name dedup moved `cro-optimization` into the semantic top-K at
+        cosine 0.587. Treating mere membership as support disabled the demotion
+        and regressed the six-query benchmark from 27/1 to 25/4.
+        """
+        query = "codon optimization protein design"
+        corpus = self._corpus()
+        homonym = next(rec for rec in corpus if rec["id"] == "skill:homonym")
+        terms = registry.damped_query_terms(registry.query_terms(query), corpus)
+        undemoted = registry.search_score(homonym, query, "claude", terms, "")
+
+        scored = dict(
+            (name, score)
+            for score, name in self._ranked(
+                {"skill:domain": 0.78, "skill:homonym": 0.59}
+            )
+        )
+
+        self.assertAlmostEqual(
+            scored["optimization-optimization"],
+            undemoted * registry.SEMANTIC_ABSENCE_FACTOR,
+            places=6,
+        )
+
     def test_an_absent_sidecar_leaves_ranking_untouched(self) -> None:
         """No vectors means no demotion: lexical-only must be byte-identical.
 
@@ -1702,6 +1728,12 @@ class SemanticAbsenceDemotionTest(IsolatedRegistryTest):
     def test_absence_factor_is_a_bounded_fraction(self) -> None:
         self.assertGreater(registry.SEMANTIC_ABSENCE_FACTOR, 0.0)
         self.assertLess(registry.SEMANTIC_ABSENCE_FACTOR, 1.0)
+        self.assertGreater(registry.SEMANTIC_EVIDENCE_COS, 0.0)
+        self.assertLess(
+            registry.SEMANTIC_EVIDENCE_COS,
+            registry.COSINE_FLOOR,
+            "avoiding a penalty must require less evidence than earning a bonus",
+        )
 
 
 if __name__ == "__main__":

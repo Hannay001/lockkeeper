@@ -28,13 +28,12 @@ are, which is why they carry an instruction prefix on the query side only.
 
 English-only is a deliberate, verified trade. The German entrypoints route correctly by
 LEXICAL scoring alone: "GmbH Gesellschaftsvertrag pruefen" hits its entrypoint at 62.1 with
-no semantic help. BGE also retrieves them semantically. Four live German legal queries put
-196-200 German records in a raw 200-wide top-K, with the correct capability first. That
-top-K presence -- not a retired "semantic never demotes" property -- is what keeps
-SEMANTIC_ABSENCE_FACTOR from taxing them. Raw top-K used to contain only ~100 distinct
-capabilities because runtime twins consumed half the slots; query now filters for the target
-runtime and groups (type, name) before applying top-K. Re-measure the German queries if the
-model or SEMANTIC_TOPK changes.
+no semantic help. BGE also retrieves them semantically: the correct first hit on four live
+German legal queries scored 0.709-0.842, safely above SEMANTIC_EVIDENCE_COS=0.61. That
+measured evidence -- not a retired "semantic never demotes" property -- keeps the relevant
+records from being taxed. Raw top-K used to contain only ~100 distinct capabilities because
+runtime twins consumed half the slots; query now filters for the target runtime and groups
+(type, name) before applying top-K. Re-measure if the model, evidence floor, or top-K changes.
 A multilingual model that is bad at retrieval buys us less than an English one that is good.
 
 BGE applies its instruction prefix to the QUERY ONLY -- passages are embedded raw. Prefixing
