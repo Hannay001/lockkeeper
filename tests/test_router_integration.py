@@ -314,7 +314,9 @@ class IsolatedRegistryTest(unittest.TestCase):
 
     def test_semantic_query_requests_runtime_filtered_grouped_results(self) -> None:
         output = self.temp / "semantic-output"
-        interpreter = output / "embedder" / ".venv" / "bin" / "python"
+        interpreter = output / "embedder" / ".venv" / (
+            "Scripts/python.exe" if os.name == "nt" else "bin/python"
+        )
         script = output / "embedder" / "embed.py"
         interpreter.parent.mkdir(parents=True)
         interpreter.touch()
