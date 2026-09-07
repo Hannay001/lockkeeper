@@ -3181,9 +3181,15 @@ MAX_ALIAS_WORDS = 4
 # score. A record was penalised for the sidecar's silence about it. With an English-only
 # Entry-point records are matched case-insensitively on every query.
 #
-# Additive cannot do that: a record with no semantic hit keeps its lexical score EXACTLY.
-# The sidecar can only ever lift a record, never demote one, so "never worse without the
-# sidecar" holds by construction rather than by tuning.
+# Additive cannot do that: a record with no semantic hit keeps its lexical score EXACTLY,
+# so the BONUS itself never demotes anything.
+#
+# That is no longer the whole story. SEMANTIC_ABSENCE_FACTOR below deliberately does demote,
+# but only on a different signal (absence from a wide top-K) and only when the sidecar is
+# healthy. The invariant that survives is narrower and worth stating precisely: with the
+# sidecar missing or stale, `semantic` is empty, both mechanisms are inert, and ranking is
+# byte-identical to lexical-only. "Never worse without the sidecar" still holds; "the sidecar
+# can only lift" does not.
 #
 # Sized so a CONFIDENT semantic hit can COMPETE WITH a mid-strength lexical match (~40-50)
 # without steamrolling a strong one (~85-90). Semantic exists to surface what lexical misses,
@@ -3222,7 +3228,7 @@ SEMANTIC_TOPK = 200
 # Absence from a wide top-K, when the sidecar is healthy, is evidence AGAINST a record --
 # not merely "unknown". A lexical homonym ("optimization" in a codon-design query, matching
 # Conversion Rate Optimization) can otherwise out-score a real domain match on one shared
-# word, and the additive bonus can never pull it back down because it only ever adds.
+# word, and the additive bonus alone can never pull it back down.
 #
 # Measured on the live 7,530-capability corpus with 6 labeled queries (top-8):
 #   baseline                 24 relevant, 5 collisions

@@ -29,9 +29,14 @@ are, which is why they carry an instruction prefix on the query side only.
 English-only is a deliberate, verified trade. Non-English entrypoints are already routed by lexical scoring alone.
 correctly by LEXICAL scoring alone (their plugin.json keywords are maintainer-authored: the
 query "validate shareholder agreement" hits its entrypoint at 62.1 with no semantic help).
-Since the router now applies semantic as an ADDITIVE bonus that can never demote a record,
-leaving German semantically dark costs it nothing. A multilingual model that is bad at
-retrieval buys us less than an English one that is good at it.
+Since the router applies semantic as an ADDITIVE bonus, leaving German semantically dark
+costs it nothing on that axis. The router also demotes records absent from the semantic
+top-K (SEMANTIC_ABSENCE_FACTOR), which in principle could penalise a German record the
+English model does not rank. Measured on the live corpus, it does not: German legal queries
+kept or improved their top-3 (e.g. "Kündigungsschreiben Mietvertrag prüfen" promoted
+`mietrecht` over `vertragsausfueller`), because the model still places German records in a
+200-wide top-K even when it scores them modestly. Re-check this if the top-K narrows.
+A multilingual model that is bad at retrieval buys us less than an English one that is good.
 
 BGE applies its instruction prefix to the QUERY ONLY -- passages are embedded raw. Prefixing
 both sides would just add a constant the model has to encode away.
