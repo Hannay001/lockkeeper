@@ -3219,6 +3219,21 @@ SEMANTIC_BUILD_TIMEOUT_SECONDS = 900
 # exactly as before.
 SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS = 30
 SEMANTIC_TOPK = 200
+# Absence from a wide top-K, when the sidecar is healthy, is evidence AGAINST a record --
+# not merely "unknown". A lexical homonym ("optimization" in a codon-design query, matching
+# Conversion Rate Optimization) can otherwise out-score a real domain match on one shared
+# word, and the additive bonus can never pull it back down because it only ever adds.
+#
+# Measured on the live 7,530-capability corpus with 6 labeled queries (top-8):
+#   baseline                 24 relevant, 5 collisions
+#   proportional IDF          5 relevant, 0 collisions   (destroys recall -- rejected)
+#   absence factor 0.60      25 relevant, 4 collisions
+#   absence factor 0.35      27 relevant, 1 collision    <- chosen
+#   absence factor 0.15      27 relevant, 1 collision    (no further gain)
+#
+# Scaling rather than excluding keeps this recoverable: a strong lexical match survives
+# demotion, so a sidecar blind spot cannot erase a genuinely relevant capability.
+SEMANTIC_ABSENCE_FACTOR = float(os.environ.get("CAPABILITY_ROUTER_ABSENCE_FACTOR", "0.35"))
 
 # MUST equal SCHEMA_VERSION in embedder/embed.py. It is the contract "these vectors were
 # produced by the model this code expects", and an index that disagrees is silently ignored
@@ -3454,9 +3469,10 @@ def ranked_records(
     ]
     blended: list[tuple[float, dict[str, Any]]] = []
     for score, record in lexical:
-        # Absent from the sidecar's top-K means UNKNOWN, not dissimilar. Treating it as a
-        # 0.0 cosine is what made the old convex blend penalise records for the sidecar's
-        # silence -- see SEMANTIC_BONUS. Here a miss simply yields no bonus.
+        # Absent from the sidecar's top-K yields no BONUS (never a negative cosine): treating
+        # it as a 0.0 cosine in a convex blend is what used to penalise records for the
+        # sidecar's silence -- see SEMANTIC_BONUS. Absence is handled separately below, as a
+        # bounded multiplier on the lexical score, and only when the sidecar actually replied.
         cosine = semantic.get(record["id"], 0.0)
         if score <= 0:
             # A lexically-dark record may only enter on an ABSOLUTE semantic bar -- never a
@@ -3465,6 +3481,14 @@ def ranked_records(
             # to lexical-only ranking.
             if not semantic or cosine < SEMANTIC_ADMIT_COS:
                 continue
+        elif semantic and record["id"] not in semantic:
+            # The sidecar answered and did not rank this record anywhere in a top-K that
+            # spans hundreds of candidates. For a lexical homonym that is the only signal
+            # available that the shared word means something else here. Scale rather than
+            # drop, so a strong lexical match still survives a sidecar blind spot.
+            # `semantic` is empty when the sidecar is missing or stale, so this is inert
+            # exactly when the router is already lexical-only.
+            score *= SEMANTIC_ABSENCE_FACTOR
         score += SEMANTIC_BONUS * normalized_cosine(cosine)
         blended.append((score, record))
 

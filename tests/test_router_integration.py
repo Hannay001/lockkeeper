@@ -1485,5 +1485,125 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
         self.assertNotIn("lexical-only", stderr.getvalue())
 
 
+class SemanticAbsenceDemotionTest(IsolatedRegistryTest):
+    """Absence from a healthy top-K demotes a lexical homonym.
+
+    Reported symptom: a codon/protein query returned `cro-optimization`
+    (Conversion Rate Optimization), `jpa-patterns`, and `postgres-patterns` in
+    the top 8. They matched the single word "optimization". The semantic bonus
+    is purely additive, so it could lift real matches but never push a homonym
+    down, and the model had already excluded all three from a 200-wide top-K.
+    """
+
+    def _corpus(self) -> list[dict]:
+        def record(rid: str, name: str, description: str) -> dict:
+            return {
+                "id": rid,
+                "name": name,
+                "type": "skill",
+                "description": description,
+                "category": "research-knowledge",
+                "status": "active",
+                "runtimes": ["claude"],
+                "source_path": "",
+                "registration_count": 1,
+                "owner": "",
+                "tags": [],
+            }
+
+        # The homonym must WIN on lexical score alone, or the fixture cannot tell
+        # demotion from no demotion. It repeats the shared word and puts it in the
+        # name; the real domain match mentions it once, in prose.
+        return [
+            record(
+                "skill:domain",
+                "wetlab-literature-search",
+                "search literature for codon usage in heterologous protein expression",
+            ),
+            record(
+                "skill:homonym",
+                "optimization-optimization",
+                "optimization: conversion optimization and funnel optimization for landing pages",
+            ),
+        ]
+
+    def _ranked(self, semantic: dict[str, float]) -> list[tuple[float, str]]:
+        output = self.temp / "rank-output"
+        output.mkdir(parents=True, exist_ok=True)
+        with (
+            mock.patch.object(registry, "semantic_hits", return_value=semantic),
+            mock.patch.object(registry, "registry_manifest_fingerprint", return_value="fp"),
+            mock.patch.object(registry, "load_aliases", return_value={}),
+        ):
+            ranked = registry.ranked_records(
+                self._corpus(), "codon optimization protein design", "claude", output
+            )
+        return [(score, rec["name"]) for score, rec in ranked]
+
+    def _rank(self, semantic: dict[str, float]) -> list[str]:
+        return [name for _score, name in self._ranked(semantic)]
+
+    def test_absence_from_a_healthy_topk_demotes_a_homonym(self) -> None:
+        """The homonym's own score must drop, not merely lose on the winner's bonus.
+
+        Asserting order alone is not enough here: the semantic bonus on the real
+        match already flips the order by itself, so an ordering-only assertion
+        passes even with demotion removed.
+        """
+        query = "codon optimization protein design"
+        corpus = self._corpus()
+        homonym = next(rec for rec in corpus if rec["id"] == "skill:homonym")
+        terms = registry.damped_query_terms(registry.query_terms(query), corpus)
+        undemoted = registry.search_score(homonym, query, "claude", terms, "")
+
+        scored = dict((name, score) for score, name in self._ranked({"skill:domain": 0.78}))
+        actual = scored["optimization-optimization"]
+
+        self.assertLess(actual, undemoted, "an absent homonym must be demoted below its lexical score")
+        self.assertAlmostEqual(actual, undemoted * registry.SEMANTIC_ABSENCE_FACTOR, places=6)
+
+    def test_an_absent_sidecar_leaves_ranking_untouched(self) -> None:
+        """No vectors means no demotion: lexical-only must be byte-identical.
+
+        Compares against the pre-change formula computed directly, so this
+        cannot pass just because both sides run the same new code.
+        """
+        output = self.temp / "rank-output"
+        output.mkdir(parents=True, exist_ok=True)
+        corpus = self._corpus()
+        query = "codon optimization protein design"
+
+        with (
+            mock.patch.object(registry, "registry_manifest_fingerprint", return_value="fp"),
+            mock.patch.object(registry, "load_aliases", return_value={}),
+            mock.patch.object(registry, "semantic_hits", return_value={}),
+        ):
+            actual = [
+                (round(score, 6), rec["name"])
+                for score, rec in registry.ranked_records(corpus, query, "claude", output)
+            ]
+            # Old behaviour: pure lexical score, no absence multiplier at all.
+            terms = registry.damped_query_terms(registry.query_terms(query), corpus)
+            expected = sorted(
+                (
+                    (round(registry.search_score(rec, query, "claude", terms, ""), 6), rec["name"])
+                    for rec in corpus
+                    if registry.search_score(rec, query, "claude", terms, "") > 0
+                ),
+                key=lambda item: (-item[0], item[1].lower()),
+            )
+
+        self.assertEqual(actual, expected)
+
+    def test_demotion_scales_and_never_eliminates(self) -> None:
+        """A demoted record stays rankable: a blind spot must not erase it."""
+        ranked = self._rank({"skill:domain": 0.78})
+        self.assertIn("optimization-optimization", ranked)
+
+    def test_absence_factor_is_a_bounded_fraction(self) -> None:
+        self.assertGreater(registry.SEMANTIC_ABSENCE_FACTOR, 0.0)
+        self.assertLess(registry.SEMANTIC_ABSENCE_FACTOR, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
