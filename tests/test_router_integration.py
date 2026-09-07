@@ -279,9 +279,19 @@ class IsolatedRegistryTest(unittest.TestCase):
 
         snapshots.assert_called_once_with()
         rebuild.assert_called_once_with(output, quiet=True)
-        # Bounded recovery: no semantic reindex (fails open to lexical), no
-        # surface linking or strict link checks on the query path.
-        reindex.assert_not_called()
+        # Recovery re-embeds under its own short budget. Skipping it used to leave
+        # the fingerprint moved and every vector invalid, so routing silently ran
+        # lexical-only for the rest of the session. Measured cost of the realistic
+        # case is a fraction of a second (6 of 7,296 vectors on a config drift).
+        reindex.assert_called_once_with(
+            output, quiet=True, timeout=registry.SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS
+        )
+        self.assertLessEqual(
+            registry.SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS,
+            registry.SEMANTIC_BUILD_TIMEOUT_SECONDS,
+            "the query path must stay bounded well under the explicit build budget",
+        )
+        # Still no surface linking or strict link checks on the query path.
         link.assert_not_called()
         check.assert_not_called()
         self.assertEqual(fresh.call_count, 3)
@@ -1435,6 +1445,44 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
                 registry._warn_once("degraded")
 
         self.assertEqual(stdout.getvalue(), "")
+
+    def test_autoheal_reindex_failure_still_serves_a_degraded_route(self) -> None:
+        """A slow or broken embed must never turn recovery into an outage."""
+        output = registry.ROUTER_CONFIG.output_dir
+        output.mkdir(parents=True, exist_ok=True)
+        stale = RuntimeError(
+            "Runtime configuration changed after the registry was built; run snapshot-runtimes, then rebuild"
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(registry, "assert_registry_fresh", side_effect=[stale, stale, None, None]),
+            mock.patch.object(registry, "refresh_runtime_snapshots"),
+            mock.patch.object(registry, "rebuild"),
+            mock.patch.object(registry, "reindex_semantic", return_value=False) as reindex,
+            contextlib.redirect_stderr(stderr),
+        ):
+            registry.ensure_query_registry_fresh(output)
+
+        reindex.assert_called_once()
+        self.assertIn("lexical-only", stderr.getvalue())
+
+    def test_autoheal_success_does_not_claim_degradation(self) -> None:
+        output = registry.ROUTER_CONFIG.output_dir
+        output.mkdir(parents=True, exist_ok=True)
+        stale = RuntimeError(
+            "Runtime configuration changed after the registry was built; run snapshot-runtimes, then rebuild"
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(registry, "assert_registry_fresh", side_effect=[stale, stale, None, None]),
+            mock.patch.object(registry, "refresh_runtime_snapshots"),
+            mock.patch.object(registry, "rebuild"),
+            mock.patch.object(registry, "reindex_semantic", return_value=True),
+            contextlib.redirect_stderr(stderr),
+        ):
+            registry.ensure_query_registry_fresh(output)
+
+        self.assertNotIn("lexical-only", stderr.getvalue())
 
 
 if __name__ == "__main__":

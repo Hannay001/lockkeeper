@@ -2972,21 +2972,23 @@ def ensure_query_registry_fresh(output: Path) -> None:
             with contextlib.redirect_stdout(io.StringIO()):
                 refresh_runtime_snapshots()
                 rebuild(output, quiet=True)
-                # Deliberately NO reindex_semantic here: embedding can take many
-                # minutes on large corpora and semantic_hits() fails open to
-                # lexical-only until `lockkeeper reindex` runs explicitly. Routing
-                # recovery must stay bounded; surface linking stays an explicit
-                # lifecycle step (`lockkeeper link`) so machines without every harness
-                # can still route.
+                # The rebuild moved the fingerprint, which invalidates every
+                # vector. Re-embedding is incremental (the sidecar reuses cached
+                # vectors by content hash), so the realistic cost here is a
+                # fraction of a second: a measured config-drift rebuild moved 6
+                # of 7,296 vectors and re-embedded in 0.65s. Leaving it stale
+                # used to drop routing to lexical-only for the rest of the
+                # session. Bounded by its own short timeout and fail-open, so a
+                # pathological corpus degrades exactly as it did before.
+                semantic_restored = reindex_semantic(
+                    output, quiet=True, timeout=SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS
+                )
             assert_registry_fresh(output, deep=False)
-            # The rebuild above moved the registry fingerprint, so any existing
-            # vectors no longer match. Recovery is intentionally silent on stdout,
-            # but the resulting ranking downgrade must not be: without this the
-            # router can spend a whole session lexical-only with no signal.
-            _warn_once(
-                "registry was refreshed automatically; semantic vectors are now stale "
-                "and ranking is lexical-only until `lockkeeper reindex` runs"
-            )
+            if not semantic_restored:
+                _warn_once(
+                    "registry was refreshed automatically but the semantic index could not be "
+                    "rebuilt; ranking is lexical-only until `lockkeeper reindex` runs"
+                )
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as refresh_error:
             raise RuntimeError(
                 "Automatic registry refresh failed: "
@@ -3208,8 +3210,14 @@ COSINE_FLOOR = float(os.environ.get("CAPABILITY_ROUTER_COSINE_FLOOR", "0.68"))
 # model was. Normalize between MEASURED floor and MEASURED ceiling instead.
 COSINE_CEILING = float(os.environ.get("CAPABILITY_ROUTER_COSINE_CEILING", "0.85"))
 SEMANTIC_TIMEOUT_SECONDS = 20
-# Embedding 5.5k records takes ~1-3 min on CPU; a query takes seconds. Separate budgets.
+# A cold embed of ~7.3k records takes ~140s on CPU; a query takes seconds. Separate budgets.
 SEMANTIC_BUILD_TIMEOUT_SECONDS = 900
+# Auto-heal re-embeds only what changed (the sidecar reuses cached vectors by content hash).
+# A measured config-drift rebuild moved 6 of 7,296 vectors and re-embedded in 0.65s, so the
+# recovery path can afford to keep the index valid. This budget bounds the pathological case:
+# if the work is unexpectedly large the reindex is abandoned and routing stays lexical-only,
+# exactly as before.
+SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS = 30
 SEMANTIC_TOPK = 200
 
 # MUST equal SCHEMA_VERSION in embedder/embed.py. It is the contract "these vectors were
@@ -3237,7 +3245,7 @@ def normalized_cosine(cosine: float) -> float:
     return min(1.0, (cosine - COSINE_FLOOR) / span)
 
 
-def reindex_semantic(output: Path, quiet: bool = False) -> bool:
+def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = None) -> bool:
     """Re-embed the corpus against the CURRENT manifest fingerprint. Returns True on success.
 
     Why this exists as a first-class verb, and why rebuild() calls it:
@@ -3275,7 +3283,7 @@ def reindex_semantic(output: Path, quiet: bool = False) -> bool:
             ],
             capture_output=True,
             text=True,
-            timeout=SEMANTIC_BUILD_TIMEOUT_SECONDS,
+            timeout=SEMANTIC_BUILD_TIMEOUT_SECONDS if timeout is None else timeout,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
