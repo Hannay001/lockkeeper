@@ -3174,7 +3174,9 @@ MAX_ALIAS_WORDS = 4
 # Semantic is an ADDITIVE BONUS, never a convex blend. This is a correctness constraint, not
 # a tuning preference.
 #
-# semantic_hits() returns only the top SEMANTIC_TOPK records. For everything below that cut
+# semantic_hits() returns only the top SEMANTIC_TOPK distinct, runtime-compatible
+# capabilities. The sidecar groups duplicate registration rows before that cut. For
+# everything below it
 # it reports NOTHING -- which is "no information", NOT "cosine 0.0". The old convex blend,
 #     score = 100 * ((1-alpha)*lex_n + alpha*normalized_cosine(cos))
 # read that absence as a zero and so RESCALED every unranked record to 0.55x its lexical
@@ -3266,6 +3268,55 @@ def normalized_cosine(cosine: float) -> float:
     return min(1.0, (cosine - COSINE_FLOOR) / span)
 
 
+def packaged_embedder_script() -> Optional[Path]:
+    """Locate embed.py when Lockkeeper is running from an installed wheel."""
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("lockkeeper_embedder.embed")
+    except (ImportError, AttributeError, ValueError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    candidate = Path(spec.origin)
+    return candidate if candidate.is_file() else None
+
+
+def semantic_sidecar_script(output: Path, synchronize: bool = False) -> Path:
+    """Resolve the current semantic sidecar and optionally refresh its output copy.
+
+    Source installs historically copied embed.py into the generated output once.
+    That copy then drifted for months while the router kept executing it, including
+    after cache-validation fixes landed in the repository. The checked-out router
+    source is canonical when present. Reindex/query refresh the generated copy
+    atomically; if a sandbox blocks that write, execute the canonical source directly.
+    Standalone/package installs without a source-tree embedder keep using the existing
+    output copy.
+    """
+    target = output / "embedder" / "embed.py"
+    checkout_source = _router_root() / "embedder" / "embed.py"
+    source = checkout_source if checkout_source.is_file() else packaged_embedder_script()
+    if source is None:
+        return target
+    if source.resolve(strict=False) == target.resolve(strict=False):
+        return target
+    if not synchronize:
+        return source
+
+    try:
+        source_text = source.read_text(encoding="utf-8")
+        current_text = target.read_text(encoding="utf-8") if target.is_file() else ""
+        if current_text != source_text:
+            atomic_write(target, source_text)
+        return target
+    except OSError as exc:
+        _warn_once(
+            f"could not refresh the generated semantic sidecar ({exc}); "
+            "using the current router source directly"
+        )
+        return source
+
+
 def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = None) -> bool:
     """Re-embed the corpus against the CURRENT manifest fingerprint. Returns True on success.
 
@@ -3286,7 +3337,7 @@ def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = 
     """
     ensure_router_config_valid()
     interpreter = output / "embedder" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    script = output / "embedder" / "embed.py"
+    script = semantic_sidecar_script(output, synchronize=True)
     registry = output / "registry.jsonl"
     if not interpreter.is_file() or not script.is_file() or not registry.is_file():
         if not quiet:
@@ -3323,7 +3374,7 @@ def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = 
     return True
 
 
-def semantic_hits(output: Path, query: str, fingerprint: str) -> dict[str, float]:
+def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "") -> dict[str, float]:
     """capability_id -> cosine, for the top-K semantically nearest capabilities.
 
     Best-effort in every direction. Missing sidecar, missing index, stale index, crash,
@@ -3333,6 +3384,9 @@ def semantic_hits(output: Path, query: str, fingerprint: str) -> dict[str, float
     """
     if not query.strip():
         return {}
+    # Refresh code before inspecting index freshness. A stale index must degrade,
+    # but it must not leave a known-stale executable copy in place as a side effect.
+    script = semantic_sidecar_script(output, synchronize=True)
     meta = load_json(output / "embeddings.json")
     if meta.get("schema_version") != SEMANTIC_SCHEMA_VERSION:
         return {}
@@ -3348,13 +3402,18 @@ def semantic_hits(output: Path, query: str, fingerprint: str) -> dict[str, float
         )
         return {}
     interpreter = output / "embedder" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    script = output / "embedder" / "embed.py"
     if not interpreter.is_file() or not script.is_file():
         return {}
     try:
+        command = [
+            str(interpreter), str(script), "query", "--index", str(output),
+            "--topk", str(SEMANTIC_TOPK),
+        ]
+        registry = output / "registry.jsonl"
+        if runtime and registry.is_file():
+            command.extend(["--registry", str(registry), "--runtime", runtime])
         proc = subprocess.run(
-            [str(interpreter), str(script), "query", "--index", str(output),
-             "--topk", str(SEMANTIC_TOPK)],
+            command,
             input=query,
             text=True,
             capture_output=True,
@@ -3467,7 +3526,7 @@ def ranked_records(
     ]
     terms = damped_query_terms(query_terms(query), compatible)
     aliases = load_aliases(str(output))
-    semantic = semantic_hits(output, query, registry_manifest_fingerprint(str(output)))
+    semantic = semantic_hits(output, query, registry_manifest_fingerprint(str(output)), runtime)
 
     lexical = [
         (search_score(record, query, runtime, terms, aliases.get(record["id"], "")), record)

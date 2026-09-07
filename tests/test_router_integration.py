@@ -256,7 +256,97 @@ class IsolatedRegistryTest(unittest.TestCase):
         self.assertEqual(ranked, [(1.0, record)])
         self.assertEqual(load_aliases.call_args.args, (str(custom_output),))
         self.assertEqual(manifest_fingerprint.call_args.args, (str(custom_output),))
-        self.assertEqual(semantic_hits.call_args.args, (custom_output, "example", "fingerprint"))
+        self.assertEqual(
+            semantic_hits.call_args.args,
+            (custom_output, "example", "fingerprint", "codex"),
+        )
+
+    def test_semantic_sidecar_refreshes_a_stale_output_copy_from_the_router_source(self) -> None:
+        output = self.temp / "semantic-output"
+        source = self.router_root / "embedder" / "embed.py"
+        target = output / "embedder" / "embed.py"
+        source.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True)
+        source.write_text("# current sidecar\n", encoding="utf-8")
+        target.write_text("# stale sidecar\n", encoding="utf-8")
+        self.configure(output_dir=output)
+
+        with mock.patch.object(registry, "_router_root", return_value=self.router_root):
+            resolved = registry.semantic_sidecar_script(output, synchronize=True)
+
+        self.assertEqual(resolved, target)
+        self.assertEqual(target.read_text(encoding="utf-8"), "# current sidecar\n")
+
+    def test_semantic_sidecar_uses_current_source_if_output_copy_cannot_be_refreshed(self) -> None:
+        output = self.temp / "semantic-output"
+        source = self.router_root / "embedder" / "embed.py"
+        target = output / "embedder" / "embed.py"
+        source.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True)
+        source.write_text("# current sidecar\n", encoding="utf-8")
+        target.write_text("# stale sidecar\n", encoding="utf-8")
+        self.configure(output_dir=output)
+
+        with mock.patch.object(registry, "_router_root", return_value=self.router_root), mock.patch.object(
+            registry, "atomic_write", side_effect=PermissionError("sandboxed")
+        ):
+            resolved = registry.semantic_sidecar_script(output, synchronize=True)
+
+        self.assertEqual(resolved, source)
+        self.assertEqual(target.read_text(encoding="utf-8"), "# stale sidecar\n")
+
+    def test_semantic_sidecar_can_refresh_from_the_packaged_wheel_source(self) -> None:
+        output = self.temp / "semantic-output"
+        source = self.temp / "site-packages" / "lockkeeper_embedder" / "embed.py"
+        target = output / "embedder" / "embed.py"
+        source.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True)
+        source.write_text("# packaged sidecar\n", encoding="utf-8")
+        target.write_text("# stale sidecar\n", encoding="utf-8")
+
+        with mock.patch.object(registry, "_router_root", return_value=self.temp / "no-checkout"), mock.patch.object(
+            registry, "packaged_embedder_script", return_value=source
+        ):
+            resolved = registry.semantic_sidecar_script(output, synchronize=True)
+
+        self.assertEqual(resolved, target)
+        self.assertEqual(target.read_text(encoding="utf-8"), "# packaged sidecar\n")
+
+    def test_semantic_query_requests_runtime_filtered_grouped_results(self) -> None:
+        output = self.temp / "semantic-output"
+        interpreter = output / "embedder" / ".venv" / "bin" / "python"
+        script = output / "embedder" / "embed.py"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+        script.write_text("# installed sidecar\n", encoding="utf-8")
+        (output / "registry.jsonl").write_text("{}\n", encoding="utf-8")
+        (output / "embeddings.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": registry.SEMANTIC_SCHEMA_VERSION,
+                    "registry_fingerprint": "fingerprint",
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.configure(output_dir=output)
+
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"hits": [{"id": "skill:a", "cos": 0.8}]}),
+            stderr="",
+        )
+        with mock.patch.object(registry.subprocess, "run", return_value=completed) as run:
+            hits = registry.semantic_hits(output, "query", "fingerprint", "claude")
+
+        self.assertEqual(hits, {"skill:a": 0.8})
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--runtime") + 1], "claude")
+        self.assertEqual(
+            command[command.index("--registry") + 1],
+            str(output / "registry.jsonl"),
+        )
 
     def test_query_freshness_self_heals_only_known_staleness_and_verifies_once(self) -> None:
         output = self.temp / "canonical-output"
@@ -1354,6 +1444,10 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
 
     def setUp(self) -> None:
         super().setUp()
+        # These tests deliberately deny writes and force stale recovery. Never let
+        # that exercise the operator's real ~/.agents/capabilities directory when
+        # a test is run alone or test ordering changes.
+        self.configure(output_dir=self.temp / "degraded-output")
         registry._EMITTED_WARNINGS.clear()
         self.addCleanup(registry._EMITTED_WARNINGS.clear)
 
@@ -1428,6 +1522,11 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
         self.assertEqual(hits, {}, "a fingerprint mismatch must not score anything")
         self.assertIn("lexical-only", stderr.getvalue())
         self.assertIn("lockkeeper reindex", stderr.getvalue())
+        self.assertEqual(
+            (output / "embedder" / "embed.py").read_text(encoding="utf-8"),
+            (REPOSITORY_ROOT / "embedder" / "embed.py").read_text(encoding="utf-8"),
+            "stale index fallback must not leave stale sidecar code installed",
+        )
 
     def test_degradation_notices_are_not_repeated(self) -> None:
         stderr = io.StringIO()

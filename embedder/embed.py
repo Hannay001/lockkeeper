@@ -26,16 +26,15 @@ for building competitive landscape decks"; it is a question ABOUT it. Paraphrase
 trained for sentence<->sentence equivalence and do not do this. Retrieval models (BGE, E5)
 are, which is why they carry an instruction prefix on the query side only.
 
-English-only is a deliberate, verified trade. Non-English entrypoints are already routed by lexical scoring alone.
-correctly by LEXICAL scoring alone (their plugin.json keywords are maintainer-authored: the
-query "validate shareholder agreement" hits its entrypoint at 62.1 with no semantic help).
-Since the router applies semantic as an ADDITIVE bonus, leaving German semantically dark
-costs it nothing on that axis. The router also demotes records absent from the semantic
-top-K (SEMANTIC_ABSENCE_FACTOR), which in principle could penalise a German record the
-English model does not rank. Measured on the live corpus, it does not: German legal queries
-kept or improved their top-3 (e.g. "Kündigungsschreiben Mietvertrag prüfen" promoted
-`mietrecht` over `vertragsausfueller`), because the model still places German records in a
-200-wide top-K even when it scores them modestly. Re-check this if the top-K narrows.
+English-only is a deliberate, verified trade. The German entrypoints route correctly by
+LEXICAL scoring alone: "GmbH Gesellschaftsvertrag pruefen" hits its entrypoint at 62.1 with
+no semantic help. BGE also retrieves them semantically. Four live German legal queries put
+196-200 German records in a raw 200-wide top-K, with the correct capability first. That
+top-K presence -- not a retired "semantic never demotes" property -- is what keeps
+SEMANTIC_ABSENCE_FACTOR from taxing them. Raw top-K used to contain only ~100 distinct
+capabilities because runtime twins consumed half the slots; query now filters for the target
+runtime and groups (type, name) before applying top-K. Re-measure the German queries if the
+model or SEMANTIC_TOPK changes.
 A multilingual model that is bad at retrieval buys us less than an English one that is good.
 
 BGE applies its instruction prefix to the QUERY ONLY -- passages are embedded raw. Prefixing
@@ -111,7 +110,7 @@ def _load_vector_cache(out: Path) -> dict:
         matrix = np.frombuffer(bin_path.read_bytes(), dtype=np.float32).reshape(count, dim)
     except ValueError:
         return {}
-    return {rid: (h, matrix[i]) for i, (rid, h) in enumerate(zip(ids, hashes, strict=False))}
+    return {rid: (h, matrix[i]) for i, (rid, h) in enumerate(zip(ids, hashes, strict=True))}
 
 
 def cmd_build(args: argparse.Namespace) -> int:
@@ -145,7 +144,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     cache = _load_vector_cache(out)
     vectors = np.zeros((len(rankable), DIM), dtype=np.float32)
     to_embed = []
-    for i, (rid, h) in enumerate(zip(ids, hashes, strict=False)):
+    for i, (rid, h) in enumerate(zip(ids, hashes, strict=True)):
         hit = cache.get(rid)
         if hit is not None and hit[0] == h:
             vectors[i] = hit[1]  # reuse path; cached vector was L2-normalized at its own build
@@ -158,7 +157,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         norms = np.linalg.norm(fresh, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         fresh /= norms
-        for row, i in zip(fresh, to_embed, strict=False):
+        for row, i in zip(fresh, to_embed, strict=True):
             vectors[i] = row
 
     (out / "embeddings.bin").write_bytes(vectors.tobytes())
@@ -191,6 +190,66 @@ def _is_non_rankable(record: dict) -> bool:
     return record.get("rankable") is False
 
 
+def runtime_grouped_hits(
+    index_ids: list[str],
+    scores,
+    records: list[dict],
+    runtime: str,
+    topk: int,
+) -> list[dict]:
+    """Return top-K distinct, runtime-compatible capabilities.
+
+    The registry can contain several rows for one logical capability, commonly a
+    runtime-local row plus a shared row. Cutting the raw vector rows at K before
+    filtering used to waste half of a 200-wide result on name twins. It also let
+    incompatible runtimes consume slots. Group first, then cut, and propagate the
+    winning group score to every eligible registration so the router can score the
+    exact row it selected.
+    """
+    if topk <= 0:
+        return []
+
+    records_by_id = {
+        str(record.get("id", "")): record
+        for record in records
+        if record.get("id") and record.get("name") and record.get("type")
+    }
+    eligible_members: dict[tuple[str, str], list[dict]] = {}
+    for record in records_by_id.values():
+        runtimes = record.get("runtimes") or []
+        if runtime and runtime not in runtimes and "shared" not in runtimes:
+            continue
+        key = (str(record["type"]), str(record["name"]).lower())
+        eligible_members.setdefault(key, []).append(record)
+
+    group_scores: dict[tuple[str, str], float] = {}
+    for record_id, score in zip(index_ids, scores, strict=True):
+        record = records_by_id.get(str(record_id))
+        if record is None:
+            continue
+        key = (str(record["type"]), str(record["name"]).lower())
+        if key not in eligible_members:
+            continue
+        numeric_score = float(score)
+        if key not in group_scores or numeric_score > group_scores[key]:
+            group_scores[key] = numeric_score
+
+    ordered_groups = sorted(group_scores, key=lambda key: (-group_scores[key], key))[:topk]
+    hits: list[dict] = []
+    for key in ordered_groups:
+        cosine = round(group_scores[key], 4)
+        for record in eligible_members[key]:
+            hits.append(
+                {
+                    "id": record["id"],
+                    "cos": cosine,
+                    "type": record["type"],
+                    "name": record["name"],
+                }
+            )
+    return hits
+
+
 def cmd_query(args: argparse.Namespace) -> int:
     import numpy as np
 
@@ -215,11 +274,22 @@ def cmd_query(args: argparse.Namespace) -> int:
     vector /= norm
 
     scores = matrix @ vector  # cosine: both sides are L2-normalized
-    topk = min(args.topk, count)
-    top = np.argpartition(-scores, topk - 1)[:topk]
-    top = top[np.argsort(-scores[top])]
-
-    hits = [{"id": meta["ids"][i], "cos": round(float(scores[i]), 4)} for i in top]
+    if args.registry:
+        records = []
+        with Path(args.registry).open(encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+        hits = runtime_grouped_hits(meta["ids"], scores, records, args.runtime, args.topk)
+    else:
+        topk = min(max(args.topk, 0), count)
+        if topk:
+            top = np.argpartition(-scores, topk - 1)[:topk]
+            top = top[np.argsort(-scores[top])]
+            hits = [{"id": meta["ids"][i], "cos": round(float(scores[i]), 4)} for i in top]
+        else:
+            hits = []
     print(json.dumps({"model": MODEL_NAME, "dim": dim, "hits": hits}))
     return 0
 
@@ -237,6 +307,8 @@ def main() -> int:
     query = sub.add_parser("query")
     query.add_argument("--index", required=True)
     query.add_argument("--topk", type=int, default=200)
+    query.add_argument("--registry", default="")
+    query.add_argument("--runtime", default="")
     query.set_defaults(func=cmd_query)
 
     args = parser.parse_args()
