@@ -1481,7 +1481,7 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
                 # Must not raise: a sandboxed agent still needs a bundle.
                 registry.ensure_query_registry_fresh(output)
 
-        self.assertIn("refresh lock is unavailable", stderr.getvalue())
+        self._assert_actionable_unwritable_notice(stderr.getvalue())
 
     def test_a_read_only_output_directory_does_not_break_queries(self) -> None:
         output = registry.ROUTER_CONFIG.output_dir
@@ -1497,7 +1497,26 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
         with contextlib.redirect_stderr(stderr):
             registry.ensure_query_registry_fresh(output)
 
-        self.assertIn("refresh lock is unavailable", stderr.getvalue())
+        self._assert_actionable_unwritable_notice(stderr.getvalue())
+
+    def _assert_actionable_unwritable_notice(self, stderr_text: str) -> None:
+        """The notice must diagnose the real constraint, not the lock.
+
+        Regression from a real debugging session: the message named only the
+        refresh lock, so it read as a stuck lock. An operator went looking for a
+        holder (there was none), confirmed the lock was free, and concluded the
+        router was broken. The lock is merely the first write attempted -- the
+        sandbox denies every write under the output directory -- so the text must
+        say the process cannot write, and must name a recovery that actually
+        works from an unsandboxed session.
+        """
+        self.assertIn("cannot write to", stderr_text)
+        self.assertIn("unsandboxed", stderr_text)
+        self.assertIn("rebuild", stderr_text)
+        # Blaming the lock is what caused the misdiagnosis; it must not come back.
+        # Match the phrase, not the bare word: the "lockkeeper:" prefix that
+        # _warn_once adds legitimately contains "lock".
+        self.assertNotIn("refresh lock", stderr_text)
 
     def test_a_stale_semantic_index_announces_lexical_only_ranking(self) -> None:
         output = self.temp / "semantic-output"

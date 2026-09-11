@@ -2951,9 +2951,19 @@ def ensure_query_registry_fresh(output: Path) -> None:
         # EACCES/EROFS. Refusing to answer would be worse than answering from
         # the index we already have, so serve the existing registry and say so
         # once on stderr. stdout stays exactly on contract for JSON consumers.
+        #
+        # Name the CONSTRAINT, not the lock. An earlier version reported only
+        # "the refresh lock is unavailable", which reads like a stuck lock and
+        # sent a debugging session hunting for a holder that never existed. The
+        # lock is merely the first write attempted: the same sandbox denies every
+        # write under `output`, so clearing the lock would change nothing. The
+        # only real recovery is an unsandboxed refresh, so say that instead.
         _warn_once(
-            f"registry is stale but the refresh lock is unavailable ({lock_error.strerror}); "
-            "serving the existing index without refreshing"
+            f"registry is stale and this process cannot write to {output} "
+            f"({lock_error.strerror}) -- typically a sandboxed or read-only session. "
+            "Serving the existing index; ranking quality is unchanged and only "
+            "capabilities added since the last rebuild are missing. "
+            "Run `lockkeeper rebuild` from an unsandboxed session to refresh"
         )
         return
     with lock_handle as lock:
