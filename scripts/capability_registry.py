@@ -5680,17 +5680,45 @@ class RegistryArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: error: {safe_message}\n")
 
 
+MAX_QUERY_CHARS = 16_384
+MAX_QUERY_TERMS = 256
+# Read limit for --stdin: enough to see that a pasted prompt is long, never unbounded.
+MAX_QUERY_INPUT_CHARS = 262_144
+
+
+def focus_query(raw: str) -> tuple[str, bool]:
+    """Clip a long task to what routing reads: MAX_QUERY_CHARS characters, then the
+    text before the (MAX_QUERY_TERMS + 1)-th distinct term. Returns (query, clipped).
+
+    Agents route whole user prompts, which run to hundreds of words and can carry
+    pasted logs. The task is almost always stated first, so routing on the opening
+    of a long prompt beats refusing it (this used to fail above 64 words).
+    """
+    query = clean_text(raw)
+    clipped = False
+    if len(query) > MAX_QUERY_CHARS:
+        query, clipped = query[:MAX_QUERY_CHARS].rstrip(), True
+    seen: set[str] = set()
+    for match in re.finditer(r"[A-Za-z0-9+#.-]+", query):
+        seen.add(match.group(0).lower())
+        if len(seen) > MAX_QUERY_TERMS:
+            query, clipped = query[: match.start()].rstrip(), True
+            break
+    return query, clipped
+
+
 def query_from_args(args: argparse.Namespace) -> str:
     if args.read_stdin and args.query:
         raise RuntimeError("use either positional query terms or --stdin, not both")
-    raw = sys.stdin.read(4_097) if args.read_stdin else " ".join(args.query)
-    if len(raw) > 4_096:
-        raise RuntimeError("query exceeds 4,096 characters")
-    query = clean_text(raw)
+    raw = sys.stdin.read(MAX_QUERY_INPUT_CHARS) if args.read_stdin else " ".join(args.query)
+    query, clipped = focus_query(raw)
     if not query:
         raise RuntimeError("query must contain at least one non-whitespace term")
-    if len(re.findall(r"[A-Za-z0-9+#.-]+", query)) > 64:
-        raise RuntimeError("query exceeds 64 searchable terms; provide a focused task summary")
+    if clipped:
+        _warn_once(
+            f"long query: routed on its first {len(query):,} characters "
+            f"(limits: {MAX_QUERY_CHARS:,} characters, {MAX_QUERY_TERMS} distinct terms)"
+        )
     return query
 
 
