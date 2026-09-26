@@ -23,7 +23,12 @@ class RouterConfigError(RuntimeError):
     """A configured router source could not be read or validated."""
 
 
-TOP_LEVEL_SCALAR_KEYS = {"output_dir", "claude_json_path", "default_project"}
+TOP_LEVEL_SCALAR_KEYS = {"output_dir", "claude_json_path", "default_project", "bundle_size"}
+
+# How many capabilities a routed bundle holds unless a caller asks for another size.
+DEFAULT_BUNDLE_SIZE = 10
+BUNDLE_SIZE_RANGE = (3, 20)
+BUNDLE_SIZE_ENV = "LOCKKEEPER_BUNDLE_SIZE"
 PROJECT_KEYS = {
     "name",
     "snapshot_dir",
@@ -55,6 +60,7 @@ class RouterConfig:
     hermes_shared_surface_root: Path
     active_config_paths: tuple[Path, ...]
     extensions: tuple[tuple[str, Any], ...] = ()
+    bundle_size: int = DEFAULT_BUNDLE_SIZE
 
     def get_extension(self, key: str, default: Any = None) -> Any:
         return dict(self.extensions).get(key, default)
@@ -132,6 +138,23 @@ def _path(value: Any, path: Path, field: str) -> Path:
     return candidate.resolve(strict=False)
 
 
+def _bundle_size(value: Any, source: str) -> int:
+    low, high = BUNDLE_SIZE_RANGE
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise RouterConfigError(f"{source}: bundle_size must be an integer from {low} to {high}")
+    return value
+
+
+def resolve_bundle_size(config: RouterConfig, environ: Mapping[str, str] = os.environ) -> int:
+    """The bundle size to use when a caller doesn't pass one: the environment, then the config."""
+    override = environ.get(BUNDLE_SIZE_ENV, "").strip()
+    if override:
+        return _bundle_size(override, BUNDLE_SIZE_ENV)
+    return config.bundle_size
+
+
 def _path_list(value: Any, path: Path, field: str) -> tuple[Path, ...]:
     if not isinstance(value, list):
         raise _config_error(path, f"{field} must be an array of paths")
@@ -184,6 +207,10 @@ def _apply_overlay(config: RouterConfig, data: Mapping[str, Any], path: Path) ->
         values["output_dir"] = _path(data["output_dir"], path, "output_dir")
     if "claude_json_path" in data:
         values["claude_json_path"] = _path(data["claude_json_path"], path, "claude_json_path")
+    if "bundle_size" in data:
+        if isinstance(data["bundle_size"], str):
+            raise _config_error(path, "bundle_size must be an integer, not a string")
+        values["bundle_size"] = _bundle_size(data["bundle_size"], f"Router configuration {path}")
 
     project = _table(data, path, "project")
     project_fields = {

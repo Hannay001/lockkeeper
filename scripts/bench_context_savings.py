@@ -40,13 +40,15 @@ BENCHMARK_TASKS = (
 )
 
 
-def run(runtime: str) -> dict:
+def run(runtime: str, size: int | None = None) -> dict:
     output = registry.ROUTER_CONFIG.output_dir
     records = registry.load_registry(output)
     rows = []
     skipped = []
     for task in BENCHMARK_TASKS:
-        result = registry.bundle(records, task, runtime, "", 8, output, estimate_savings=True)
+        result = registry.bundle(
+            records, task, runtime, "", size or registry.configured_bundle_size(), output, estimate_savings=True
+        )
         # A sparse or freshly built index legitimately routes nothing for some
         # tasks; bundle() then returns a warning without a savings block. Skip
         # those instead of crashing the whole benchmark with a KeyError.
@@ -118,9 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Context-savings benchmark for the README proof.")
     parser.add_argument("--runtime", default="claude", help="Runtime perspective to route from")
     parser.add_argument("--json", action="store_true", help="Emit the raw report as JSON")
+    parser.add_argument("--max", type=int, help="bundle size (default: the bundle_size setting, 10)")
     args = parser.parse_args(argv)
 
-    report = run(args.runtime)
+    report = run(args.runtime, args.max)
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=True))
     else:

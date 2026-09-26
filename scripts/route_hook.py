@@ -93,7 +93,10 @@ def run(argv: list[str], output: Path, project: str = "") -> int:
         description="UserPromptSubmit hook: add the capabilities that fit the prompt as context",
     )
     parser.add_argument("--runtime", choices=RUNTIMES, default="claude")
-    parser.add_argument("--max", type=int, default=6, dest="max_count", help="bundle size (3-12)")
+    parser.add_argument(
+        "--max", type=int, dest="max_count",
+        help="bundle size, 3-20 (default: the bundle_size setting, 10 unless changed)",
+    )
     parser.add_argument(
         "--format", choices=["claude", "text"], default="claude",
         help="claude: hookSpecificOutput JSON; text: plain context on stdout",
@@ -107,9 +110,9 @@ def run(argv: list[str], output: Path, project: str = "") -> int:
         records = load_records(output)
         if not records:
             return 0
-        result = registry.bundle(
-            records, query, args.runtime, project, min(max(args.max_count, 3), 12), output, verify_sources=True
-        )
+        low, high = registry.BUNDLE_SIZE_RANGE
+        size = registry.configured_bundle_size() if args.max_count is None else min(max(args.max_count, low), high)
+        result = registry.bundle(records, query, args.runtime, project, size, output, verify_sources=True)
         text = context_text(result)
     except Exception as error:  # noqa: BLE001 - a routing hint must never block a prompt
         print(f"lockkeeper route-hook: skipped ({type(error).__name__})", file=sys.stderr)

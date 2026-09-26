@@ -12,12 +12,12 @@ Use this skill at the start of a non-trivial task when the best capability set i
 Run:
 
 ```bash
-lockkeeper bundle --stdin --runtime <codex|claude|hermes|jcode> --max 8 <<'CAPABILITY_QUERY'
+lockkeeper bundle --stdin --runtime <codex|claude|hermes|jcode> <<'CAPABILITY_QUERY'
 <task in concrete keywords>
 CAPABILITY_QUERY
 ```
 
-If a project overlay is configured (`config/<name>.toml`), add `--project <name>` to include its policy pack lanes. Keep the heredoc delimiter quoted so task text is never evaluated by the shell.
+The bundle holds up to the configured `bundle_size` (10 unless the user changed it); add `--max <3-20>` only when the task clearly needs a narrower or wider set. If a project overlay is configured (`config/<name>.toml`), add `--project <name>` to include its policy pack lanes. Keep the heredoc delimiter quoted so task text is never evaluated by the shell.
 
 ## Execute the portfolio
 

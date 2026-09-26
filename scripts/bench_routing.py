@@ -241,7 +241,11 @@ def score_ranking(ids: list[Optional[str]], label: dict[str, Any]) -> dict[str, 
 def score_bundle(ids: list[Optional[str]], label: dict[str, Any]) -> dict[str, float]:
     gt = set(label["gt"])
     hits = len(gt & set(ids))
-    return {"bundle_recall": hits / len(gt), "bundle_precision": hits / len(ids) if ids else 0.0}
+    return {
+        "bundle_recall": hits / len(gt),
+        "bundle_precision": hits / len(ids) if ids else 0.0,
+        "bundle_size": float(len(ids)),
+    }
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -451,8 +455,8 @@ def print_report(report: dict[str, Any]) -> None:
         print(f"{metric:<14}" + "".join(f"{summary[side][metric]:>15.3f}" for side in sides))
     bundles = [side for side in ("baseline_bundle", "decision_bundle") if side in summary]
     print(f"\n{'bundle':<14}" + "".join(f"{side.split('_')[0]:>15}" for side in bundles))
-    for metric in ("bundle_recall", "bundle_precision"):
-        print(f"{metric.split('_')[1]:<14}" + "".join(f"{summary[side][metric]:>15.3f}" for side in bundles))
+    for metric in ("bundle_recall", "bundle_precision", "bundle_size"):
+        print(f"{metric.split('_')[1]:<14}" + "".join(f"{summary[side].get(metric, 0):>15.3f}" for side in bundles))
     latency = report["latency_ms"]
     print(
         "\nlatency: "
@@ -485,7 +489,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     go.add_argument("--provider-json", help="a [extensions.decision] table as JSON")
     go.add_argument("--provider-timeout", type=float, default=0, help="seconds; overrides the 120 s config cap")
     go.add_argument("--runtime", default="claude")
-    go.add_argument("--max", type=int, default=8, help="portfolio size (3-12)")
+    go.add_argument("--max", type=int, default=10, help="bundle size (3-20); 10 is the product default")
     go.add_argument("--limit", type=int, default=0, help="only the first N tasks")
     go.add_argument("--all-tasks", action="store_true", help="include generic_only tasks")
     go.add_argument(

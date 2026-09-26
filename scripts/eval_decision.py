@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate a decision provider on labeled routing tasks.")
     parser.add_argument("labels", type=Path, help="JSONL of {query, relevant[, runtime]}")
     parser.add_argument("--provider-json", help="override [extensions.decision] for this run (a JSON object)")
-    parser.add_argument("--max", type=int, default=8, help="portfolio size (3-12)")
+    parser.add_argument("--max", type=int, default=10, help="bundle size (3-20)")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     registry.ensure_router_config_valid()

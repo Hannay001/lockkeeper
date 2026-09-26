@@ -42,7 +42,15 @@ from operator import itemgetter
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Union
 
-from router_config import RouterConfig, RouterConfigError, load_router_config, split_project_argument
+from router_config import (
+    BUNDLE_SIZE_RANGE,
+    DEFAULT_BUNDLE_SIZE,
+    RouterConfig,
+    RouterConfigError,
+    load_router_config,
+    resolve_bundle_size,
+    split_project_argument,
+)
 import decision_provider
 import telemetry
 
@@ -280,6 +288,16 @@ except RouterConfigError as error:
             script_path=Path(__file__), include_repository=False, include_explicit=False
         )
     )
+
+
+# Past the first four entries, a bundle is topped up only with capabilities scoring at
+# least this share of the best match (tuned on SkillRouter Eval Core; docs/BENCHMARK.md).
+BUNDLE_FILL_RATIO = 0.5
+
+
+def configured_bundle_size() -> int:
+    """Bundle size when a caller doesn't choose one: LOCKKEEPER_BUNDLE_SIZE, else bundle_size, else 10."""
+    return resolve_bundle_size(ROUTER_CONFIG)
 
 
 def ensure_router_config_valid() -> None:
@@ -2957,6 +2975,17 @@ def _keys_relevant(keys: tuple[str, ...]):
     return narrow
 
 
+# Router config keys that shape a route's output but not what gets indexed.
+ROUTING_ONLY_CONFIG_KEYS = ("bundle_size",)
+
+
+def _without_keys(keys: tuple[str, ...]):
+    def narrow(data: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in data.items() if key not in keys}
+
+    return narrow
+
+
 def capability_relevant_bytes(path: Path) -> bytes:
     """Bytes that define this config's capability surface.
 
@@ -2982,6 +3011,14 @@ def capability_relevant_bytes(path: Path) -> bytes:
             _keys_relevant(CODEX_CONFIG_CAPABILITY_KEYS),
         ),
     }
+    if resolved.suffix == ".toml" and resolved not in narrowers and (
+        resolved.parent == _deterministic_config_dir().resolve(strict=False)
+        or resolved in {item.resolve(strict=False) for item in ROUTER_CONFIG.active_config_paths}
+    ):
+        # Lockkeeper's own config: every key but routing-only ones like
+        # bundle_size, so changing how many capabilities a route returns never
+        # makes the index look stale (the hook would stop routing until a rebuild).
+        narrowers[resolved] = ("toml", _without_keys(ROUTING_ONLY_CONFIG_KEYS))
     selected = narrowers.get(resolved)
     if selected is None:
         return raw
@@ -5649,8 +5686,14 @@ def bundle(
                 required=bool(output_rule.get("required", False)),
             )
 
+    # Top up to the bundle size: the first four slots take the best remaining
+    # matches, later ones only candidates scoring at least BUNDLE_FILL_RATIO of the
+    # best match, so a narrow task keeps a narrow bundle.
+    top_score = ranked[0][0] if ranked else 0.0
     for score, record in ranked:
-        if len(selected) >= min(max_count, 4):
+        if len(selected) >= max_count:
+            break
+        if len(selected) >= min(max_count, 4) and score < top_score * BUNDLE_FILL_RATIO:
             break
         add(record, "support", "Additional relevant, non-duplicate support capability.", score)
 
@@ -6612,7 +6655,15 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_parser.add_argument(
         "--project", help="Select a project configuration; accepted before or after the subcommand"
     )
-    bundle_parser.add_argument("--max", type=int, default=8, dest="max_count", help="Portfolio size from 3 to 12")
+    bundle_parser.add_argument(
+        "--max",
+        type=int,
+        dest="max_count",
+        help=(
+            f"Bundle size from {BUNDLE_SIZE_RANGE[0]} to {BUNDLE_SIZE_RANGE[1]} "
+            "(default: the bundle_size setting, 10 unless changed)"
+        ),
+    )
     bundle_parser.add_argument(
         "--savings",
         action="store_true",
@@ -6916,8 +6967,10 @@ def _main() -> int:
             else:
                 emit_search(records, query, args.runtime, args.limit, args.json, output, verify_sources=True)
         elif args.command == "bundle":
-            if not 3 <= args.max_count <= 12:
-                raise RuntimeError("--max must be between 3 and 12")
+            if args.max_count is None:
+                args.max_count = configured_bundle_size()
+            elif not BUNDLE_SIZE_RANGE[0] <= args.max_count <= BUNDLE_SIZE_RANGE[1]:
+                raise RuntimeError(f"--max must be between {BUNDLE_SIZE_RANGE[0]} and {BUNDLE_SIZE_RANGE[1]}")
             query = query_from_args(args)
             project = clean_text(args.project).lower()
             if project:
