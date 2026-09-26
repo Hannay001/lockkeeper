@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lockkeeper"
-version = "1.1.2"
+version = "1.2.0"
 description = "Skill router and prompt-injection firewall for AI coding agents: give Claude Code, Codex and Cursor the right skills, MCP servers and tools for each task."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,7 +38,8 @@ Homepage = "https://github.com/Hannay001/lockkeeper"
 Issues = "https://github.com/Hannay001/lockkeeper/issues"
 Documentation = "https://github.com/Hannay001/lockkeeper#documentation"
 Benchmark = "https://github.com/Hannay001/lockkeeper/blob/main/docs/BENCHMARK.md"
-Changelog = "https://github.com/Hannay001/lockkeeper/blob/main/ROADMAP.md"
+Changelog = "https://github.com/Hannay001/lockkeeper/blob/main/CHANGELOG.md"
+Roadmap = "https://github.com/Hannay001/lockkeeper/blob/main/ROADMAP.md"
 
 [project.scripts]
 lockkeeper = "capability_registry:main"
