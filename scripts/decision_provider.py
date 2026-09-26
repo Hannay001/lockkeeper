@@ -55,8 +55,8 @@ API_KEY_ENV = "LOCKKEEPER_DECISION_API_KEY"
 MAX_SHORTLIST = 48
 MAX_DESCRIPTION_CHARS = 280
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-# A spread this small across the shortlist carries no ordering information; the
-# provider is treated as abstaining rather than reshuffling on noise.
+# A spread smaller than this fraction of the largest score carries no ordering
+# information; the provider is treated as abstaining rather than reshuffling on noise.
 FLAT_SPREAD = 0.05
 CLARIFICATION_THRESHOLD = 0.8
 
@@ -417,32 +417,61 @@ def make_provider(settings: DecisionSettings, *, output: Path, sidecar_script: P
     raise DecisionConfigError(f"unknown decision provider {settings.provider!r}")
 
 
+def normalize(scores: dict[str, float]) -> dict[str, float]:
+    """Rescale one shortlist's probabilities to [0, 1]; {} when they carry no order.
+
+    Providers are calibrated very differently. On long tasks a cross-encoder's
+    probabilities can all sit between 0.001 and 0.02 while still ordering the
+    shortlist well, and a typed-decision model may rate everything 0.3-0.8. What
+    transfers across providers is the ORDER and relative spread, so that is what
+    the blend uses.
+    """
+    if is_flat(scores):
+        return {}
+    low, high = min(scores.values()), max(scores.values())
+    return {key: (value - low) / (high - low) for key, value in scores.items()}
+
+
 def blend(
     ranked: list[tuple[float, dict[str, Any]]], scores: dict[str, float], weight: float
 ) -> list[tuple[float, dict[str, Any]]]:
-    """Blend provider probabilities into Lockkeeper's scores for shortlisted rows.
+    """Reorder the rows the provider judged; nothing else moves.
 
-    score' = (1 - w) * score + w * p * top, where top is the best shortlisted
-    score. p = 1 lifts a row toward the top of the shortlist; p = 0 keeps (1 - w)
-    of its own evidence, so a provider can reorder but never erase a candidate.
-    Rows the provider did not judge keep their score exactly.
+    Judged rows are re-sorted by (1 - w) * score / top + w * q, where top is the
+    best judged score and q the provider's probability normalized across the
+    shortlist. The re-sorted rows go back into the positions the judged rows held,
+    each taking the score of the position it lands in. So a provider can promote or
+    demote within its shortlist but never erase a row, rows it never saw keep their
+    place and score, and the score curve that the bundle's cutoffs read is
+    unchanged. (Rescaling judged rows' scores instead let unjudged rows overtake the
+    whole shortlist whenever a provider's probabilities were uniformly low.)
     """
-    if not scores:
+    positions = [index for index, (_score, record) in enumerate(ranked) if record["id"] in scores]
+    normalized = normalize({ranked[index][1]["id"]: scores[ranked[index][1]["id"]] for index in positions})
+    top = max((ranked[index][0] for index in positions), default=0.0)
+    if not normalized or top <= 0:
         return ranked
-    top = max((score for score, record in ranked if record["id"] in scores), default=0.0)
-    if top <= 0:
-        return ranked
-    blended = [
-        ((1.0 - weight) * score + weight * scores[record["id"]] * top, record)
-        if record["id"] in scores
-        else (score, record)
-        for score, record in ranked
-    ]
-    return sorted(blended, key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]))
+    order = sorted(
+        positions,
+        key=lambda index: (
+            -((1.0 - weight) * ranked[index][0] / top + weight * normalized[ranked[index][1]["id"]]),
+            index,
+        ),
+    )
+    reordered = list(ranked)
+    for slot, source in zip(positions, order):
+        reordered[slot] = (ranked[slot][0], ranked[source][1])
+    return reordered
 
 
 def is_flat(scores: dict[str, float]) -> bool:
-    return len(scores) < 2 or max(scores.values()) - min(scores.values()) < FLAT_SPREAD
+    """True when the scores cannot order the shortlist: fewer than two, or a spread
+    below FLAT_SPREAD of the largest score (relative, so a provider whose useful
+    probabilities are all small still counts)."""
+    if len(scores) < 2:
+        return True
+    low, high = min(scores.values()), max(scores.values())
+    return high - low <= 1e-9 or high - low < FLAT_SPREAD * high
 
 
 class DecisionRun:

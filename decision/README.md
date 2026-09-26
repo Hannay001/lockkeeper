@@ -6,9 +6,9 @@ of that ranking, asking of each candidate "would this capability materially
 help with this task?", and Lockkeeper blends the answers into its own scores.
 
 ```
-task ─► lexical (+ semantic) ranking ─► shortlist (24) ─► decision provider ─► blend ─► lanes, policy, cap ─► bundle
-                                         only eligible,     P(useful) per         (1-w)·score + w·p·top
-                                         non-denied,        candidate
+task ─► lexical (+ semantic) ranking ─► shortlist (24) ─► decision provider ─► reorder ─► lanes, policy, cap ─► bundle
+                                         only eligible,     P(useful) per         the shortlist only:
+                                         non-denied,        candidate             (1-w)·score/top + w·p̂
                                          trusted rows
 ```
 
@@ -16,7 +16,7 @@ The provider supplies evidence. Lockkeeper keeps the authority: eligibility,
 deny rules, required lanes, runtime access, trust checks and the portfolio cap
 are applied exactly as without it. With no provider configured, routing is
 byte-identical to before. A provider that times out, errors, or returns flat
-scores changes nothing, and the route says so.
+scores (a spread under 5% of its largest score) changes nothing, and the route says so.
 
 ## Modes
 
@@ -99,7 +99,7 @@ command = ["/path/to/python", "/path/to/my_decider.py"]
 | Key | Default | Meaning |
 |---|---|---|
 | `shortlist` | 24 | Candidates judged per route (2–48). |
-| `weight` | 0.5 | Blend weight `w`. A candidate the provider rejects keeps `1-w` of its own score; it is reordered, never erased. |
+| `weight` | 0.5 | Blend weight `w`. The shortlist is re-sorted by `(1-w)·score/top + w·p̂`, where `p̂` is the provider's probability rescaled to 0–1 across the shortlist, so any provider's calibration works. Rows move only within the shortlist and take the score of the position they land in: a candidate is reordered, never erased, and rows the provider never saw keep their place. |
 | `timeout_seconds` | 8 | Provider budget per route. |
 | `clarification` | true | Also ask whether the task is too vague. At p ≥ 0.8, rerank mode adds a "ask a clarifying question" next action. |
 

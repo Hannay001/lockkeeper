@@ -179,7 +179,9 @@ def main(argv: list[str] | None = None) -> int:
                 "protocol": PROTOCOL_VERSION,
                 "provider": f"sidecar:{args.backend}",
                 "model": model,
-                "scores": {key: round(max(0.0, min(1.0, value)), 4) for key, value in scores.items()},
+                # Six places: a cross-encoder's probabilities on long tasks can all be
+                # below 0.01, and four places would erase the order among them.
+                "scores": {key: round(max(0.0, min(1.0, value)), 6) for key, value in scores.items()},
                 "clarification": None if clarification is None else round(clarification, 4),
             }
         )
