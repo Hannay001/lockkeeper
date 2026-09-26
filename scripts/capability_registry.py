@@ -33,6 +33,7 @@ if sys.version_info < (3, 11):
     raise SystemExit("capability registry requires Python 3.11 or newer")
 import tomllib
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Union
@@ -120,6 +121,69 @@ def _bootstrap_seed_snapshots(config) -> None:
 
 
 
+@dataclass(frozen=True)
+class ResourceCorpus:
+    """A large body of reference shards that routes as ONE capability.
+
+    Thousands of shard skills (statute sections, case-law batches, API pages)
+    used to compete one-by-one with real capabilities in global routing. A
+    corpus declares them as children: they leave the global ranking and the
+    semantic index, their lexical hits roll up into the parent, and a selected
+    parent carries its best-matching shards as `resources`.
+    """
+
+    id: str
+    name: str
+    root: Path
+    description: str
+    top_k: int
+
+
+RESOURCE_CORPORA: tuple[ResourceCorpus, ...] = ()
+RESOURCE_TOP_K = 5
+
+
+def parse_resource_corpora(raw: Any) -> tuple[ResourceCorpus, ...]:
+    if not isinstance(raw, list):
+        raise RouterConfigError("config extensions.resource_corpora must be an array of tables")
+    corpora: list[ResourceCorpus] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"config extensions.resource_corpora[{index}]"
+        if not isinstance(entry, dict):
+            raise RouterConfigError(f"{where} must be a table")
+        unknown = sorted(set(entry) - {"name", "root", "description", "top_k"})
+        if unknown:
+            raise RouterConfigError(f"{where} has unknown key(s): {', '.join(unknown)}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
+            raise RouterConfigError(f"{where}.name must be a lowercase slug (letters, digits, - or _)")
+        if name in seen:
+            raise RouterConfigError(f"{where}.name {name!r} is declared twice")
+        seen.add(name)
+        root = entry.get("root")
+        if not isinstance(root, str) or not root.strip():
+            raise RouterConfigError(f"{where}.root must be a directory path")
+        description = entry.get("description", "")
+        if not isinstance(description, str):
+            raise RouterConfigError(f"{where}.description must be a string")
+        top_k = entry.get("top_k", RESOURCE_TOP_K)
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or not 1 <= top_k <= 20:
+            raise RouterConfigError(f"{where}.top_k must be an integer from 1 to 20")
+        corpora.append(
+            ResourceCorpus(
+                id=f"corpus:{name}",
+                name=name,
+                root=Path(os.path.expanduser(root.strip())),
+                # Runs during import, before clean_text() is defined; records are
+                # cleaned again when the parent capability is built.
+                description=" ".join(description.split())[:600],
+                top_k=top_k,
+            )
+        )
+    return tuple(corpora)
+
+
 def configure_router(config: RouterConfig, *, verified_startup: bool = False) -> None:
     """Apply the resolved structural configuration to the legacy module globals."""
     global ROUTER_CONFIG, TOOL_SNAPSHOT, CLAUDE_MCP_SNAPSHOT, CODEX_MCP_SNAPSHOT
@@ -141,19 +205,24 @@ def configure_router(config: RouterConfig, *, verified_startup: bool = False) ->
     }
     HERMES_PROFILES = config.hermes_profiles
     global EXTRA_SKILL_ROOTS
+    # Extension errors are RouterConfigError, not bare RuntimeError: at import time
+    # only RouterConfigError falls back to built-in defaults. A typo here used to
+    # crash every command on import -- including `lockkeeper hook`, and a crashing
+    # hook is a non-blocking error to the harness, so one bad line in local.toml
+    # silently switched the live firewall off.
     configured_roots = config.get_extension("extra_skill_roots", [])
     if not isinstance(configured_roots, list) or not all(isinstance(x, str) for x in configured_roots):
-        raise RuntimeError("config extensions.extra_skill_roots must be a list of paths")
+        raise RouterConfigError("config extensions.extra_skill_roots must be a list of paths")
     EXTRA_SKILL_ROOTS = tuple(Path(os.path.expanduser(item)) for item in configured_roots)
     global LEGACY_MCP_NAMES
     configured_legacy = config.get_extension("legacy_mcp_names", [])
     if not isinstance(configured_legacy, list) or not all(isinstance(x, str) for x in configured_legacy):
-        raise RuntimeError("config extensions.legacy_mcp_names must be a list of strings")
+        raise RouterConfigError("config extensions.legacy_mcp_names must be a list of strings")
     LEGACY_MCP_NAMES = frozenset(name.lower() for name in configured_legacy)
     global HERMES_SHARED_SURFACE
     configured_surface = config.get_extension("hermes_shared_surface", [])
     if not isinstance(configured_surface, list) or not all(isinstance(x, str) for x in configured_surface):
-        raise RuntimeError(
+        raise RouterConfigError(
             "config extensions.hermes_shared_surface must be a list of 'kind:relative-path:scope' strings"
         )
     if configured_surface:
@@ -161,9 +230,13 @@ def configure_router(config: RouterConfig, *, verified_startup: bool = False) ->
         for entry in configured_surface:
             parts = entry.split(":")
             if len(parts) != 3 or parts[0] not in {"core", "managed-leaf"} or parts[2] not in {"project", "shared"}:
-                raise RuntimeError(f"invalid hermes_shared_surface entry: {entry!r}")
+                raise RouterConfigError(f"invalid hermes_shared_surface entry: {entry!r}")
             parsed_surface.append((parts[0], parts[1], parts[2]))
         HERMES_SHARED_SURFACE = tuple(parsed_surface)
+    else:
+        HERMES_SHARED_SURFACE = DEFAULT_HERMES_SHARED_SURFACE
+    global RESOURCE_CORPORA
+    RESOURCE_CORPORA = parse_resource_corpora(config.get_extension("resource_corpora", []))
     HERMES_SHARED_SURFACE_ROOT = config.hermes_shared_surface_root
     PROJECT_CATALOG = config.catalog_path
     _bootstrap_seed_snapshots(config)
@@ -2520,6 +2593,13 @@ def collect_registry(output: Path) -> tuple[list[dict[str, Any]], list[dict[str,
             *plugin_agent_regs,
             *plugin_command_regs,
         ]
+    corpus_records, corpus_regs = annotate_resource_corpora(records)
+    if corpus_records:
+        records = sorted(
+            [*records, *corpus_records],
+            key=lambda row: (row["category"], row["type"], row["name"].lower(), row["id"]),
+        )
+        registration_rows.extend(corpus_regs)
     registration_by_id = {row["registration_id"]: row for row in registration_rows}
     registrations = sorted(
         registration_by_id.values(),
@@ -2529,6 +2609,57 @@ def collect_registry(output: Path) -> tuple[list[dict[str, Any]], list[dict[str,
     for record in records:
         record["registration_count"] = registration_counts[record["id"]]
     return records, registrations, legacy
+
+
+def annotate_resource_corpora(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Mark configured corpus shards as children and return any synthetic parents.
+
+    Every capability body under a corpus root becomes a shard: `parent` names
+    the corpus capability and `rankable` is False, so it leaves global ranking
+    and the semantic index. A corpus that ships its own entry document at the
+    root (root/SKILL.md or a plugin README) keeps that record as the parent;
+    otherwise a synthetic `corpus` record is created. Returns (new parent
+    records, their registrations).
+    """
+    parents: list[dict[str, Any]] = []
+    registrations_out: list[dict[str, Any]] = []
+    for corpus in RESOURCE_CORPORA:
+        root = corpus.root.resolve(strict=False)
+        prefix = str(root) + os.sep
+        members = [
+            record
+            for record in records
+            if record["type"] in SOURCE_TRUST_TYPES
+            and record["source_path"].startswith(prefix)
+            and "parent" not in record
+        ]
+        entry_docs = [record for record in members if Path(record["source_path"]).parent == root]
+        shards = [record for record in members if record not in entry_docs]
+        if not shards:
+            continue
+        if len(entry_docs) == 1:
+            parent = entry_docs[0]
+            if corpus.description and not parent["description"]:
+                parent["description"] = clean_text(corpus.description, 600)
+        else:
+            description = corpus.description or (
+                f"Reference corpus {corpus.name}: {len(shards):,} entries, searched by topic."
+            )
+            parent = capability_record(
+                corpus.id, "corpus", corpus.name, description, str(root), "active", ["shared"], 1
+            )
+            parents.append(parent)
+            registrations_out.append(
+                registration(corpus.id, "corpus", "shared", "resource-corpus", str(root), str(root), "active")
+            )
+        parent["resource_count"] = len(shards)
+        parent["resource_top_k"] = corpus.top_k
+        for shard in shards:
+            shard["parent"] = parent["id"]
+            shard["rankable"] = False
+    return parents, registrations_out
 
 
 def render_category_rows(records: list[dict[str, Any]]) -> str:
@@ -3053,6 +3184,12 @@ def _rebuild_locked(output: Path, quiet: bool) -> dict[str, Any]:
 
 
 SOURCE_TRUST_TYPES = frozenset({"skill", "agent", "command", "entrypoint"})
+KNOWN_CAPABILITY_TYPES = {
+    "skill", "plugin", "mcp", "tool", "toolset", "agent", "command", "entrypoint", "corpus",
+}
+# Types that can fill the primary lane: bodies an agent reads, and corpora whose
+# best shards it reads.
+PRIMARY_TYPES = {"skill", "entrypoint", "agent", "command", "corpus"}
 
 
 def record_source_is_trusted(record: dict[str, Any]) -> bool:
@@ -3119,7 +3256,7 @@ def load_registry(output: Path, *, verify_sources: bool = True) -> list[dict[str
             raise RuntimeError(
                 f"Invalid registry record at line {line_number}: fields {', '.join(invalid_fields)}"
             )
-        if row["type"] not in {"skill", "plugin", "entrypoint", "mcp", "tool", "toolset", "agent", "command"}:
+        if row["type"] not in KNOWN_CAPABILITY_TYPES:
             raise RuntimeError(f"Invalid registry capability type at line {line_number}: {row['type']}")
         if row["category"] not in CATEGORY_BY_SLUG:
             raise RuntimeError(f"Invalid registry category at line {line_number}: {row['category']}")
@@ -3436,11 +3573,11 @@ def record_is_eligible(record: dict[str, Any], runtime: str) -> bool:
 def record_is_rankable(record: dict[str, Any]) -> bool:
     """Free-text *ranking* visibility only. This is NOT an eligibility check.
 
-    Hook for per-deployment ranking policy: return False to keep a record
-    exact-name resolvable via choose()/exact_record() while hiding it from
-    ranked free-text search. All records are rankable by default.
+    Records marked `"rankable": false` (resource-corpus shards, or rows a
+    deployment hides) stay exact-name resolvable via choose()/exact_record()
+    but never compete in ranked free-text search. Everything else is rankable.
     """
-    return True
+    return record.get("rankable", True) is not False
 
 
 def search_score(
@@ -3532,6 +3669,7 @@ def search_score(
     if record["status"] in {"cached", "dangling", "plugin-cached"}:
         score -= 8
     type_hints = {
+        "corpus": "corpus",
         "skill": "skill",
         "mcp": "mcp",
         "plugin": "plugin",
@@ -3951,11 +4089,24 @@ def damped_query_terms(
     blobs = [f"{record['name']} {record['description']}".lower() for record in pool]
     threshold = total * IDF_DAMP_RATIO
     adjusted: list[tuple[str, float]] = []
+    rare_content_term = False
+    common_content_term = False
     for term, weight in terms:
         frequency = sum(1 for blob in blobs if term in blob)
         if frequency > threshold:
+            common_content_term = common_content_term or weight >= 1.0
             weight *= IDF_DAMP_FACTOR
+        elif frequency and weight >= 1.0:
+            rare_content_term = True
         adjusted.append((term, weight))
+    # search_score() only counts full-weight terms as real matches. When every
+    # content term that occurs in the pool is common, damping them all made every
+    # record score zero and the router returned nothing (e.g. "write python
+    # tests" in a large Python-heavy library, or any search inside a homogeneous
+    # corpus). Damping is relative: with no rare term to prefer -- a term that
+    # matches nothing is not one -- keep the query as typed.
+    if common_content_term and not rare_content_term:
+        return terms
     return adjusted
 
 
@@ -3999,6 +4150,10 @@ def ranked_records(
         score += SEMANTIC_BONUS * normalized_cosine(cosine)
         blended.append((score, record))
 
+    shards = [record for record in records if record.get("parent") and record_is_eligible(record, runtime)]
+    if shards:
+        blended = roll_up_resources(blended, compatible, shards, query, runtime, terms, aliases)
+
     ordered = sorted(
         blended,
         key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]),
@@ -4012,6 +4167,73 @@ def ranked_records(
         seen.add(key)
         unique.append((score, record))
     return unique
+
+
+def roll_up_resources(
+    blended: list[tuple[float, dict[str, Any]]],
+    compatible: list[dict[str, Any]],
+    shards: list[dict[str, Any]],
+    query: str,
+    runtime: str,
+    terms: list[tuple[str, float]],
+    aliases: dict[str, str],
+) -> list[tuple[float, dict[str, Any]]]:
+    """Lift each resource corpus by its best-matching shards.
+
+    Shards are scored lexically with the same terms as everything else --
+    exact statute names, section numbers and legal vocabulary are where lexical
+    matching is strongest, and shards are not in the semantic index. A corpus
+    scores the higher of its own score and its best shard's, and carries its
+    top shards as `resources`. A parent that is ineligible or denied is not in
+    `compatible`, so its shards stay hidden with it.
+    """
+    hits_by_parent: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
+    for shard in shards:
+        score = search_score(shard, query, runtime, terms, aliases.get(shard["id"], ""))
+        if score > 0:
+            hits_by_parent[shard["parent"]].append((score, shard))
+    if not hits_by_parent:
+        return blended
+    parents = {record["id"]: record for record in compatible if record["id"] in hits_by_parent}
+    positions = {record["id"]: index for index, (_score, record) in enumerate(blended)}
+    rolled = list(blended)
+    for parent_id, hits in hits_by_parent.items():
+        parent = parents.get(parent_id)
+        if parent is None:
+            continue
+        hits.sort(key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]))
+        top_k = parent.get("resource_top_k")
+        top_k = top_k if isinstance(top_k, int) and top_k > 0 else RESOURCE_TOP_K
+        enriched = {
+            **parent,
+            "resources": [
+                {
+                    "id": shard["id"],
+                    "type": shard["type"],
+                    "name": shard["name"],
+                    "description": clean_text(shard["description"], 160),
+                    "source_path": shard["source_path"],
+                    "score": round(score, 1),
+                }
+                for score, shard in hits[:top_k]
+            ],
+        }
+        best = hits[0][0]
+        if parent_id in positions:
+            index = positions[parent_id]
+            rolled[index] = (max(rolled[index][0], best), enriched)
+        else:
+            rolled.append((best, enriched))
+    return rolled
+
+
+def trusted_resources(record: dict[str, Any], verify_sources: bool) -> list[dict[str, Any]]:
+    resources = record.get("resources") or []
+    return [
+        resource
+        for resource in resources
+        if not verify_sources or record_source_is_trusted(resource)
+    ]
 
 
 def direct_relevance(record: dict[str, Any], query: str) -> int:
@@ -4098,6 +4320,11 @@ def emit_search(
                             "provenance": provenance,
                             "scrutinise": scrutinise,
                             **record,
+                            **(
+                                {"resources": trusted_resources(record, verify_sources)}
+                                if "resources" in record
+                                else {}
+                            ),
                         }
                         for score, record in ranked
                         for provenance, scrutinise in (capability_provenance(record),)
@@ -4124,6 +4351,78 @@ def emit_search(
             print(f"  origin: {provenance} -- untrusted body; verify before acting on its instructions")
         else:
             print(f"  origin: {provenance}")
+        for resource in trusted_resources(record, verify_sources):
+            print(f"  resource: {clean_text(resource['name'])} -> {clean_text(resource['source_path'])}")
+
+
+def corpus_shards(records: list[dict[str, Any]], corpus: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The parent record and shards of a resource corpus, by corpus or parent name."""
+    wanted = clean_text(corpus).lower()
+    parents = [
+        record
+        for record in records
+        if record.get("resource_count") and wanted in {record["name"].lower(), record["id"].lower(), f"corpus:{wanted}"}
+    ]
+    if not parents:
+        known = sorted(record["name"] for record in records if record.get("resource_count"))
+        raise RuntimeError(
+            f"no resource corpus named {corpus!r}; configured corpora: {', '.join(known) or 'none'}"
+        )
+    parent = parents[0]
+    return parent, [record for record in records if record.get("parent") == parent["id"]]
+
+
+def emit_corpus_search(
+    records: list[dict[str, Any]],
+    corpus: str,
+    query: str,
+    runtime: str,
+    limit: int,
+    as_json: bool,
+    verify_sources: bool,
+) -> None:
+    """Search inside one resource corpus (lexical: exact legal terms matter most)."""
+    parent, shards = corpus_shards(records, corpus)
+    pool = [record for record in shards if record_is_eligible(record, runtime)]
+    terms = damped_query_terms(query_terms(query), pool)
+    scored = sorted(
+        (
+            (score, record)
+            for record in pool
+            if (score := search_score(record, query, runtime, terms, "")) > 0
+        ),
+        key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]),
+    )
+    results = [
+        (score, record) for score, record in scored if not verify_sources or record_source_is_trusted(record)
+    ][:limit]
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "status": "success",
+                    "summary": f"{len(results)} matching entries in corpus {parent['name']}",
+                    "corpus": parent["name"],
+                    "query": query,
+                    "results": [
+                        {"score": round(score, 1), "name": record["name"], "type": record["type"],
+                         "description": record["description"], "load_path": record["source_path"]}
+                        for score, record in results
+                    ],
+                },
+                indent=2,
+                ensure_ascii=True,
+            )
+        )
+        return
+    if not results:
+        print(f"status: warning\nsummary: no entry in corpus {clean_text(parent['name'])} matches")
+        return
+    print(f"status: success\nsummary: {len(results)} matching entries in corpus {clean_text(parent['name'])}")
+    for score, record in results:
+        print(f"{clean_text(record['name'])} (score {score:.1f})")
+        print(f"  {clean_text(record['description'], 260)}")
+        print(f"  {clean_text(record['source_path'])}")
 
 
 def exact_record(
@@ -4219,9 +4518,7 @@ def policy_pack_for(project: str) -> dict[str, Any]:
     return data
 
 
-KNOWN_CAPABILITY_TYPES = {
-    "skill", "plugin", "mcp", "tool", "toolset", "agent", "command", "entrypoint",
-}
+
 
 
 def policy_denies(pack: dict[str, Any], record: dict[str, Any]) -> bool:
@@ -4301,6 +4598,8 @@ def context_savings(
     selected: list[dict[str, Any]],
     *,
     estimate_tokens: bool,
+    shards: Optional[list[dict[str, Any]]] = None,
+    selected_shard_paths: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     """Quantify how much capability context routing avoids for this task.
 
@@ -4324,6 +4623,18 @@ def context_savings(
     }
     if eligible_count:
         summary["selected_fraction"] = round(selected_count / eligible_count, 4)
+    shards = shards or []
+    selected_shard_paths = selected_shard_paths or set()
+    if shards:
+        # Corpus shards are reported apart from routable capabilities: "loaded 6
+        # of 5,143 capabilities" is the routing decision, "5 of 21,087 shards"
+        # is the retrieval inside the selected corpus.
+        selected_shards = sum(1 for record in shards if record["source_path"] in selected_shard_paths)
+        summary["resource_shards"] = {
+            "indexed": len(shards),
+            "selected": selected_shards,
+            "avoided": max(len(shards) - selected_shards, 0),
+        }
     if not estimate_tokens:
         return summary
 
@@ -4334,6 +4645,11 @@ def context_savings(
         tokens = estimate_body_tokens(record)
         eligible_tokens += tokens
         if record["id"] in selected_ids:
+            selected_tokens += tokens
+    for record in shards:
+        tokens = estimate_body_tokens(record)
+        eligible_tokens += tokens
+        if record["source_path"] in selected_shard_paths:
             selected_tokens += tokens
     avoided_tokens = max(eligible_tokens - selected_tokens, 0)
     summary.update(
@@ -4494,7 +4810,9 @@ def bundle(
                 ),
                 "load_path": source_load_path(record),
                 "invoke": (
-                    record["name"]
+                    "Read the resources listed below: the entries of this corpus that best match the task"
+                    if record["type"] == "corpus"
+                    else record["name"]
                     if record["type"] in {"mcp", "tool"}
                     else (
                         f"Activate Hermes toolset {record['name'].removeprefix('hermes:')} "
@@ -4508,6 +4826,12 @@ def bundle(
                 "semantic_key": semantic_key,
             }
         )
+        resources = trusted_resources(record, verify_sources)
+        if resources:
+            selected[-1]["resources"] = [
+                {"name": item["name"], "type": item["type"], "load_path": item["source_path"], "score": item["score"]}
+                for item in resources
+            ]
 
     normalized = clean_text(query).lower()
     complex_task = len(query_terms(query)) >= 5 or bool(
@@ -4637,7 +4961,7 @@ def bundle(
     primary_cap = min(2 * len(intents), 4) if intents else 2
     for intent in intents:
         for score, record in rank(intent):
-            if record["type"] not in {"skill", "entrypoint", "agent", "command"}:
+            if record["type"] not in PRIMARY_TYPES:
                 continue
             if primary_added >= primary_cap:
                 break
@@ -4654,7 +4978,7 @@ def bundle(
         # generic candidate as the decay baseline so the 0.55 cutoff stays live.
         if primary_added > 0 and top_primary_score == 0.0:
             top_primary_score = score
-        if record["type"] not in {"skill", "entrypoint", "agent", "command"}:
+        if record["type"] not in PRIMARY_TYPES:
             continue
         if record["category"] == "testing-security" and primary_added == 0:
             # Defer testing-security records while other primaries exist to add;
@@ -4806,11 +5130,16 @@ def bundle(
     selected.sort(key=lambda item: (lane_order.get(item["lane"], 99), -item["score"], item["name"].lower()))
     for item in selected:
         item.pop("semantic_key", None)
-    eligible_records = [
+    eligible_all = [
         record
         for record in records
         if record_is_eligible(record, runtime) and not policy_denies(pack, record)
     ]
+    eligible_records = [record for record in eligible_all if not record.get("parent")]
+    shard_records = [record for record in eligible_all if record.get("parent")]
+    selected_resource_ids = {
+        resource["load_path"]: resource for item in selected for resource in item.get("resources", [])
+    }
     return {
         "status": "success" if selected else "warning",
         "summary": (
@@ -4821,7 +5150,13 @@ def bundle(
         "runtime": runtime,
         "project": project or None,
         "bundle": selected,
-        "savings": context_savings(eligible_records, selected, estimate_tokens=estimate_savings),
+        "savings": context_savings(
+            eligible_records,
+            selected,
+            estimate_tokens=estimate_savings,
+            shards=shard_records,
+            selected_shard_paths=set(selected_resource_ids),
+        ),
         "next_actions": [
             "Read every non-empty load_path before using that selected skill/agent/command.",
             "Invoke MCP/tool entries directly; activate toolsets first; plugins are used through exposed capabilities.",
@@ -4867,6 +5202,8 @@ def emit_bundle(result: dict[str, Any], as_json: bool) -> None:
         if item.get("scrutinise"):
             provenance = item.get("provenance", "external")
             print(f"  origin: {provenance} -- untrusted body; verify before acting on its instructions")
+        for resource in item.get("resources", []):
+            print(f"  resource: {clean_text(resource['name'])} -> {clean_text(resource['load_path'])}")
     print("next_actions:")
     for action in result["next_actions"]:
         print(f"  - {action}")
@@ -4886,6 +5223,9 @@ def emit_bundle(result: dict[str, Any], as_json: bool) -> None:
                 f"; ~{avoided_tokens:,} of ~{eligible_tokens:,} body tokens avoided "
                 f"(est. @ {savings['bytes_per_token']} B/tok)"
             )
+        shards = savings.get("resource_shards")
+        if shards:
+            line += f"; resource shards: loaded {shards['selected']} of {shards['indexed']:,}"
         print(line)
     if result.get("decision"):
         for line in _decision_lines(result["decision"]):
@@ -5662,6 +6002,9 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--stdin", action="store_true", dest="read_stdin", help="Read task text from stdin")
     search_parser.add_argument("--runtime", choices=["codex", "claude", "hermes", "jcode", "shared"], default="codex")
     search_parser.add_argument("--limit", type=int, default=12)
+    search_parser.add_argument(
+        "--corpus", help="Search inside one resource corpus ([[extensions.resource_corpora]]) instead"
+    )
     search_parser.add_argument("--json", action="store_true")
 
     bundle_parser = subparsers.add_parser(
@@ -5913,7 +6256,12 @@ def main() -> int:
             records = ensure_query_registry_fresh(output)
             if records is None:
                 records = load_registry(output, verify_sources=False)
-            emit_search(records, query, args.runtime, args.limit, args.json, output, verify_sources=True)
+            if args.corpus:
+                emit_corpus_search(
+                    records, args.corpus, query, args.runtime, args.limit, args.json, verify_sources=True
+                )
+            else:
+                emit_search(records, query, args.runtime, args.limit, args.json, output, verify_sources=True)
         elif args.command == "bundle":
             if not 3 <= args.max_count <= 12:
                 raise RuntimeError("--max must be between 3 and 12")
