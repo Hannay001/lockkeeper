@@ -326,6 +326,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("binding: config/local.toml present (machine-local)")
     else:
         print("binding: none yet — run `lockkeeper init` to bind detected harnesses")
+    try:
+        import telemetry
+    except ImportError:
+        return 0
+    if telemetry.enabled():
+        print("telemetry: on (anonymous daily counts; `lockkeeper telemetry show` prints them)")
+    else:
+        print(
+            "telemetry: off — to help improve Lockkeeper, `lockkeeper telemetry on` shares anonymous "
+            "daily usage counts, never prompts, names or paths (docs/TELEMETRY.md)"
+        )
     return 0
 
 

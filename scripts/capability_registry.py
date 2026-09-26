@@ -44,6 +44,7 @@ from typing import Any, Iterable, Iterator, Optional, Union
 
 from router_config import RouterConfig, RouterConfigError, load_router_config, split_project_argument
 import decision_provider
+import telemetry
 
 
 ROUTER_CONFIG: RouterConfig
@@ -6777,6 +6778,25 @@ def _run_standalone(command: str, argv: list[str]) -> int:
 
 
 def main() -> int:
+    """The `lockkeeper` CLI; records opt-in, anonymous usage counts (telemetry.py)."""
+    try:
+        _, pre_argv = split_project_argument(sys.argv[1:])
+    except (RouterConfigError, RuntimeError, ValueError):
+        pre_argv = sys.argv[1:]
+    if next((token for token in pre_argv if not token.startswith("-")), None) == "telemetry":
+        position = pre_argv.index("telemetry")
+        return telemetry.cli(pre_argv[position + 1 :])
+    with telemetry.timed(pre_argv) as run:
+        code = _main()
+        run.failed = code != 0
+        if telemetry.enabled():
+            counts = load_json(ROUTER_CONFIG.output_dir / "manifest.json").get("counts")
+            if isinstance(counts, dict) and isinstance(counts.get("capabilities"), int):
+                run.capabilities = counts["capabilities"]
+        return code
+
+
+def _main() -> int:
     # Standalone commands must not depend on harness/router config health.
     _, pre_argv = split_project_argument(sys.argv[1:])
     first_command = next((tok for tok in pre_argv if not tok.startswith("-")), None)

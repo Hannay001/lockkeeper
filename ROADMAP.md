@@ -195,4 +195,6 @@ Deferred (documented design limits / tuning):
 
 - Running a hosted registry service.
 - Replacing MCP server management apps (complementary, not competing).
-- Telemetry of any kind.
+- Telemetry that is on by default, or that ever includes prompts, capability names or
+  paths. Opt-in anonymous daily counts exist (`lockkeeper telemetry on`, see
+  docs/TELEMETRY.md); nothing is sent unless a user turns it on.
