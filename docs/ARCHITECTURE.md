@@ -20,7 +20,12 @@ config (router_config.py)
   config fingerprint, and a discovery watch. Queries self-heal staleness once
   (see Freshness model).
 - **Search** is lexical scoring with alias/intent damping; an embedder
-  sidecar adds cosine re-ranking when available.
+  sidecar adds cosine re-ranking when available. Pools of 128+ rows are scored
+  through an in-memory token index, built once per process and reused by a
+  route's intent passes. The index only scores the records and terms a query
+  can match, so a long task no longer costs terms x records, and every score is
+  identical to scoring each record in turn. `scripts/bench_route_latency.py`
+  times routes on a large synthetic registry.
 - **Decision stage** (optional, `scripts/decision_provider.py`): a provider
   judges the top of the ranking and its probabilities are blended in. It never
   decides eligibility, deny rules, lanes, or the portfolio cap.

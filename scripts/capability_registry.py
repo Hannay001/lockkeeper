@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from bisect import bisect_right
 from functools import lru_cache
 if sys.version_info < (3, 11):
     raise SystemExit("capability registry requires Python 3.11 or newer")
@@ -35,8 +36,9 @@ import tomllib
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from operator import itemgetter
 from pathlib import Path
-from typing import Any, Iterable, Optional, Union
+from typing import Any, Iterable, Iterator, Optional, Union
 
 from router_config import RouterConfig, RouterConfigError, load_router_config, split_project_argument
 import decision_provider
@@ -3608,15 +3610,36 @@ def fold_umlauts(value: str) -> str:
     The corpus is bilingual and users type "Kuendigung" and "Kündigung" interchangeably.
     Without folding, a query in one spelling simply cannot match a record in the other.
     """
-    return value.translate(UMLAUT_FOLDING)
+    # Same result as value.translate(UMLAUT_FOLDING) at a fraction of the cost: ranking
+    # folds every field of every candidate record, and translate() walks a dict per
+    # character. ASCII text has nothing to fold at all.
+    if value.isascii():
+        return value
+    return value.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+
+
+@lru_cache(maxsize=4096)
+def _term_pattern(term: str) -> re.Pattern[str]:
+    """term_in_text()'s whole-word matcher, compiled once per term instead of per call.
+
+    Matches exactly what (?<![a-z0-9])TERM(?![a-z0-9]) matches. The left boundary is
+    checked after the literal instead of before it -- "not preceded by [a-z0-9]" is
+    "the text ending here is not [a-z0-9]TERM" -- so the pattern starts with a literal
+    and the regex engine scans for it instead of trying the pattern at every position.
+    """
+    escaped = re.escape(fold_umlauts(term))
+    return re.compile(rf"{escaped}(?<![a-z0-9]{escaped})(?![a-z0-9])")
 
 
 def term_in_text(term: str, text: str) -> bool:
-    folded_term = fold_umlauts(term)
-    folded_text = fold_umlauts(text)
-    return bool(
-        re.search(rf"(?<![a-z0-9]){re.escape(folded_term)}(?![a-z0-9])", folded_text)
-    )
+    return _term_pattern(term).search(fold_umlauts(text)) is not None
+
+
+@lru_cache(maxsize=64)
+def _normalized_query(query: str) -> tuple[str, str]:
+    """(lowercased clean query, its umlaut-folded form), computed once per query, not per record."""
+    normalized = clean_text(query).lower()
+    return normalized, fold_umlauts(normalized)
 
 
 def record_is_eligible(record: dict[str, Any], runtime: str) -> bool:
@@ -3644,11 +3667,18 @@ def search_score(
     terms: Optional[list[tuple[str, float]]] = None,
     alias_text: str = "",
 ) -> float:
-    normalized_query = clean_text(query).lower()
+    normalized_query, folded_query = _normalized_query(query)
     name = record["name"].lower()
     description = record["description"].lower()
     category = CATEGORY_BY_SLUG.get(record["category"], {}).get("title", "").lower()
     source = record["source_path"].lower()
+    # The same folding term_in_text() applies, done once per field instead of once
+    # per field per query term.
+    folded_name = fold_umlauts(name)
+    folded_description = fold_umlauts(description)
+    folded_category = fold_umlauts(category)
+    folded_source = fold_umlauts(source)
+    folded_alias = fold_umlauts(alias_text)
     score = 80.0 if name == normalized_query else 0.0
     direct_matches = 0
     base_matches = 0
@@ -3661,7 +3691,6 @@ def search_score(
     # the query?" That is what turns a phrasing the record does not contain into a hit.
     alias_phrase_hits = 0
     if alias_text:
-        folded_query = fold_umlauts(normalized_query)
         for phrase in alias_text.split(" | "):
             if len(phrase) > 3 and fold_umlauts(phrase) in folded_query:
                 alias_phrase_hits += 1
@@ -3672,7 +3701,9 @@ def search_score(
         direct_matches += 1
         base_matches += 1
     for term, weight in terms or query_terms(query):
-        in_alias = bool(alias_text) and term_in_text(term, alias_text)
+        # Equivalent to term_in_text(term, field) on the pre-folded fields above.
+        matches = _term_pattern(term).search
+        in_alias = bool(alias_text) and matches(folded_alias) is not None
         if (
             not in_alias
             and term not in name
@@ -3685,16 +3716,16 @@ def search_score(
         if name == term:
             score += 40 * weight
             matched = True
-        elif term_in_text(term, name):
+        elif matches(folded_name) is not None:
             score += 18 * weight
             matched = True
-        if term_in_text(term, description):
+        if matches(folded_description) is not None:
             score += 7 * weight
             matched = True
-        if term_in_text(term, source):
+        if matches(folded_source) is not None:
             score += 2 * weight
             matched = True
-        if term_in_text(term, category):
+        if matches(folded_category) is not None:
             score += 3 * weight
         if in_alias:
             # Between description (7) and source (2): a curated synonym is strong evidence,
@@ -4131,6 +4162,266 @@ def query_intents(query: str) -> list[str]:
     return segments[:MAX_INTENTS] if len(segments) > 1 else []
 
 
+# Pools at least this large are scored through a cached _LexicalIndex. Below it,
+# testing every term against every record is cheaper than building the index.
+LEXICAL_INDEX_MIN_POOL = 128
+_LEXICAL_INDEX_CACHE_SIZE = 4
+# query_terms() splits on everything outside this class, so a query term is a run of
+# these characters and every occurrence of it lies inside one maximal run of them.
+_TOKEN_RE = re.compile(r"[a-z0-9+#.-]+")
+_INDEX_FIELDS = itemgetter("name", "description", "source_path", "category")
+
+
+class _TokenPostings:
+    """Token -> ascending record positions, with the vocabulary joined for substring lookup."""
+
+    def __init__(self) -> None:
+        self._building: defaultdict[str, list[int]] = defaultdict(list)
+        self.postings: dict[str, list[int]] = {}
+        self._tokens: list[str] = []
+        self._starts: list[int] = []
+        self._text = ""
+
+    def add(self, position: int, text: str) -> None:
+        for token in set(_TOKEN_RE.findall(text)):
+            self._building[token].append(position)
+
+    def freeze(self) -> None:
+        self.postings = dict(self._building)
+        self._building = defaultdict(list)
+        self._tokens = list(self.postings)
+        self._starts = []
+        offset = 0
+        for token in self._tokens:
+            self._starts.append(offset)
+            offset += len(token) + 1
+        self._text = "\n".join(self._tokens)
+
+    def tokens_containing(self, needle: str) -> Iterator[str]:
+        """Each token that contains needle, once. needle must be a non-empty token-class string."""
+        text, starts, tokens = self._text, self._starts, self._tokens
+        found = text.find(needle)
+        while found != -1:
+            index = bisect_right(starts, found) - 1
+            yield tokens[index]
+            found = text.find(needle, starts[index] + len(tokens[index]) + 1)
+
+    def positions_matching(self, term: str, folded: str) -> set[int]:
+        """Positions where term_in_text(term, ...) holds for some indexed text, a superset.
+
+        Tokens are maximal runs of the term's own character class, so a whole-word
+        match inside the text is a whole-word match inside one token.
+        """
+        pattern = _term_pattern(term)
+        positions: set[int] = set()
+        for token in self.tokens_containing(folded):
+            if pattern.search(token) is not None:
+                positions.update(self.postings[token])
+        return positions
+
+
+class _AliasIndex:
+    """Alias-side-car lookups for one pool: alias tokens, and phrases by position."""
+
+    def __init__(self, alias_texts: list[str]) -> None:
+        self.alias_texts = alias_texts
+        self.tokens = _TokenPostings()
+        phrases: defaultdict[str, list[int]] = defaultdict(list)
+        for position, alias_text in enumerate(alias_texts):
+            if not alias_text:
+                continue
+            self.tokens.add(position, fold_umlauts(alias_text))
+            for phrase in set(alias_text.split(" | ")):
+                if len(phrase) > 3:
+                    phrases[fold_umlauts(phrase)].append(position)
+        self.tokens.freeze()
+        self.phrases = dict(phrases)
+        self._matches: dict[str, set[int]] = {}
+
+    def positions_matching(self, term: str, folded: str) -> set[int]:
+        cached = self._matches.get(term)
+        if cached is None:
+            cached = self._matches[term] = self.tokens.positions_matching(term, folded)
+        return cached
+
+    def phrase_positions(self, folded_query: str) -> set[int]:
+        """Positions with an alias phrase inside the query (search_score's phrase match)."""
+        positions: set[int] = set()
+        for phrase, phrase_positions in self.phrases.items():
+            if phrase in folded_query:
+                positions.update(phrase_positions)
+        return positions
+
+
+class _LexicalIndex:
+    """Token postings over one ranking pool, so a query only touches records it can match.
+
+    search_score() credits a term only where it occurs as a whole word (term_in_text) in
+    a field, and a record no full-weight term or alias phrase matches scores exactly 0.0.
+    Looking terms up here finds the records a query can score -- a superset, which
+    search_score() then scores exactly -- in time proportional to the matches instead of
+    terms x records. Built once per distinct pool and reused across ranking passes: a
+    route ranks the task and then each of its intents against the same pool.
+    """
+
+    def __init__(self, signature: list[tuple[str, str, str, str]]) -> None:
+        self.signature = signature
+        # Exactly the lowercased "name description" blobs damped_query_terms() counts.
+        self.name_description = _TokenPostings()
+        # Source paths, plus folded names/descriptions where folding changes them.
+        self.other = _TokenPostings()
+        for position, (name, description, source_path, _category) in enumerate(signature):
+            name_description = f"{name} {description}".lower()
+            self.name_description.add(position, name_description)
+            other = source_path.lower()
+            if not (name_description.isascii() and other.isascii()):
+                other = "\n".join(
+                    (other, fold_umlauts(other), fold_umlauts(name.lower()), fold_umlauts(description.lower()))
+                )
+            self.other.add(position, other)
+        self.name_description.freeze()
+        self.other.freeze()
+        self._frequencies: dict[tuple[str, float], int] = {}
+        self._matches: dict[str, Optional[set[int]]] = {}
+        self._aliases: list[_AliasIndex] = []
+
+    def name_description_frequency(self, term: str, threshold: float) -> Optional[int]:
+        """How many rows contain term in "name description", counted only until the
+        count exceeds threshold (all damped_query_terms() compares). None when term is
+        not a token-class string, so its occurrences need not sit inside one token."""
+        if not _TOKEN_RE.fullmatch(term):
+            return None
+        key = (term, threshold)
+        cached = self._frequencies.get(key)
+        if cached is None:
+            rows: set[int] = set()
+            for token in self.name_description.tokens_containing(term):
+                rows.update(self.name_description.postings[token])
+                if len(rows) > threshold:
+                    break
+            cached = self._frequencies[key] = len(rows)
+        return cached
+
+    def positions_matching(self, term: str) -> Optional[set[int]]:
+        """Positions whose name, description or source path may match term as a whole
+        word. None when the folded term is not a token-class string (not indexable)."""
+        if term in self._matches:
+            return self._matches[term]
+        folded = fold_umlauts(term)
+        positions = None
+        if _TOKEN_RE.fullmatch(folded):
+            positions = self.name_description.positions_matching(term, folded)
+            positions |= self.other.positions_matching(term, folded)
+        self._matches[term] = positions
+        return positions
+
+    def alias_index(self, alias_texts: list[str]) -> _AliasIndex:
+        for index in self._aliases:
+            if index.alias_texts == alias_texts:
+                return index
+        index = _AliasIndex(alias_texts)
+        self._aliases = [index, *self._aliases[:1]]
+        return index
+
+
+_LEXICAL_INDEXES: list[_LexicalIndex] = []
+
+
+def _lexical_index(pool: list[dict[str, Any]]) -> _LexicalIndex:
+    """The cached index for this pool, rebuilt whenever any indexed field differs.
+
+    Keyed on the field values, not on list or record identity: every ranking pass
+    builds a fresh pool list, and a record edited in place must not hit a stale index.
+    """
+    try:
+        signature = list(map(_INDEX_FIELDS, pool))
+    except KeyError:
+        # damped_query_terms() only reads name and description, and accepts rows that
+        # carry nothing else.
+        signature = [
+            (record["name"], record["description"], record.get("source_path", ""), record.get("category", ""))
+            for record in pool
+        ]
+    for position, index in enumerate(_LEXICAL_INDEXES):
+        if index.signature == signature:
+            _LEXICAL_INDEXES.insert(0, _LEXICAL_INDEXES.pop(position))
+            return index
+    index = _LexicalIndex(signature)
+    _LEXICAL_INDEXES.insert(0, index)
+    del _LEXICAL_INDEXES[_LEXICAL_INDEX_CACHE_SIZE:]
+    return index
+
+
+def lexical_scores(
+    pool: list[dict[str, Any]],
+    query: str,
+    runtime: str,
+    terms: Optional[list[tuple[str, float]]],
+    aliases: dict[str, str],
+) -> list[float]:
+    """search_score() for every record in pool, in pool order.
+
+    Identical to scoring each record in turn. A large pool goes through its
+    _LexicalIndex: only records that some full-weight term or alias phrase can match
+    are scored, each against just the terms that can match it. Every term left out
+    has no whole-word match in that record, so search_score() would add nothing for
+    it, and every record left out has no base match, so it would score exactly 0.0.
+    """
+    alias_texts = [aliases.get(record["id"], "") for record in pool]
+    if len(pool) < LEXICAL_INDEX_MIN_POOL:
+        return [
+            search_score(record, query, runtime, terms, alias_text)
+            for record, alias_text in zip(pool, alias_texts)
+        ]
+    index = _lexical_index(pool)
+    alias_index = index.alias_index(alias_texts)
+    resolved = terms or query_terms(query)
+    candidates = alias_index.phrase_positions(_normalized_query(query)[1])
+    # Terms that cannot be looked up (none come from query_terms()) are tried everywhere.
+    unindexed: list[int] = []
+    term_positions: list[tuple[int, set[int]]] = []
+    for term_index, (term, weight) in enumerate(resolved):
+        positions = index.positions_matching(term)
+        if positions is None:
+            unindexed.append(term_index)
+            if weight >= 1.0:
+                candidates.update(range(len(pool)))
+            continue
+        alias_positions = alias_index.positions_matching(term, fold_umlauts(term))
+        if alias_positions:
+            positions = positions | alias_positions
+        term_positions.append((term_index, positions))
+        if weight >= 1.0:
+            candidates.update(positions)
+
+    scores = [0.0] * len(pool)
+    relevant: defaultdict[int, list[int]] = defaultdict(list)
+    for term_index, positions in term_positions:
+        for position in candidates.intersection(positions):
+            relevant[position].append(term_index)
+    # Category titles are shared by thousands of rows, so their matches are resolved
+    # per category rather than indexed per record.
+    extra_by_category: dict[str, list[int]] = {}
+    for position in candidates:
+        category = index.signature[position][3]
+        extra = extra_by_category.get(category)
+        if extra is None:
+            title = fold_umlauts(CATEGORY_BY_SLUG.get(category, {}).get("title", "").lower())
+            extra = extra_by_category[category] = [
+                term_index
+                for term_index, (term, _weight) in enumerate(resolved)
+                if _term_pattern(term).search(title) is not None
+            ] + unindexed
+        term_indexes = relevant.get(position, [])
+        if extra:
+            term_indexes = sorted({*term_indexes, *extra})
+        # An alias-phrase-only candidate may match no term at all; the full list then
+        # scores the same and keeps search_score() off its query_terms() fallback.
+        subset = [resolved[term_index] for term_index in term_indexes] or resolved
+        scores[position] = search_score(pool[position], query, runtime, subset, alias_texts[position])
+    return scores
+
+
 def damped_query_terms(
     terms: list[tuple[str, float]], pool: list[dict[str, Any]]
 ) -> list[tuple[str, float]]:
@@ -4143,13 +4434,18 @@ def damped_query_terms(
     total = len(pool) or 1
     if total < 20:
         return terms
-    blobs = [f"{record['name']} {record['description']}".lower() for record in pool]
+    index = _lexical_index(pool) if total >= LEXICAL_INDEX_MIN_POOL else None
+    blobs: Optional[list[str]] = None
     threshold = total * IDF_DAMP_RATIO
     adjusted: list[tuple[str, float]] = []
     rare_content_term = False
     common_content_term = False
     for term, weight in terms:
-        frequency = sum(1 for blob in blobs if term in blob)
+        frequency = index.name_description_frequency(term, threshold) if index else None
+        if frequency is None:
+            if blobs is None:
+                blobs = [f"{record['name']} {record['description']}".lower() for record in pool]
+            frequency = sum(1 for blob in blobs if term in blob)
         if frequency > threshold:
             common_content_term = common_content_term or weight >= 1.0
             weight *= IDF_DAMP_FACTOR
@@ -4179,10 +4475,7 @@ def ranked_records(
     aliases = load_aliases(str(output))
     semantic = semantic_hits(output, query, registry_manifest_fingerprint(str(output)), runtime)
 
-    lexical = [
-        (search_score(record, query, runtime, terms, aliases.get(record["id"], "")), record)
-        for record in compatible
-    ]
+    lexical = zip(lexical_scores(compatible, query, runtime, terms, aliases), compatible)
     blended: list[tuple[float, dict[str, Any]]] = []
     for score, record in lexical:
         # Absent from the sidecar's top-K yields no BONUS (never a negative cosine): treating
@@ -4245,8 +4538,7 @@ def roll_up_resources(
     `compatible`, so its shards stay hidden with it.
     """
     hits_by_parent: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
-    for shard in shards:
-        score = search_score(shard, query, runtime, terms, aliases.get(shard["id"], ""))
+    for score, shard in zip(lexical_scores(shards, query, runtime, terms, aliases), shards):
         if score > 0:
             hits_by_parent[shard["parent"]].append((score, shard))
     if not hits_by_parent:
@@ -4293,14 +4585,18 @@ def trusted_resources(record: dict[str, Any], verify_sources: bool) -> list[dict
     ]
 
 
-def direct_relevance(record: dict[str, Any], query: str) -> int:
-    tokens = {
+@lru_cache(maxsize=64)
+def _relevance_tokens(query: str) -> frozenset[str]:
+    return frozenset(
         token
-        for token in re.split(r"[^a-z0-9+#.-]+", fold_umlauts(clean_text(query).lower()))
+        for token in re.split(r"[^a-z0-9+#.-]+", _normalized_query(query)[1])
         if len(token) > 2 and token not in GENERIC_QUERY_TERMS
-    }
-    text = f"{record['name']} {record['description']}".lower()
-    return sum(1 for token in tokens if term_in_text(token, text))
+    )
+
+
+def direct_relevance(record: dict[str, Any], query: str) -> int:
+    text = fold_umlauts(f"{record['name']} {record['description']}".lower())
+    return sum(1 for token in _relevance_tokens(query) if _term_pattern(token).search(text) is not None)
 
 
 def source_load_path(record: dict[str, Any]) -> str:
@@ -4445,8 +4741,8 @@ def emit_corpus_search(
     scored = sorted(
         (
             (score, record)
-            for record in pool
-            if (score := search_score(record, query, runtime, terms, "")) > 0
+            for score, record in zip(lexical_scores(pool, query, runtime, terms, {}), pool)
+            if score > 0
         ),
         key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]),
     )
@@ -5061,16 +5357,14 @@ def bundle(
             "Query the current framework documentation after resolving the library identifier.",
         )
     integration_added = sum(1 for item in selected if item["lane"] == "integration")
+    name_terms = [term for term, _ in query_terms(query) if term not in GENERIC_QUERY_TERMS]
     for score, record in ([] if any((harness_route, browser_route, software_route)) else ranked):
         if record["type"] not in {"mcp", "tool", "toolset", "plugin"}:
             continue
         if runtime not in record["runtimes"] and "shared" not in record["runtimes"]:
             continue
         relevance = direct_relevance(record, query)
-        explicit_name_match = any(
-            term not in GENERIC_QUERY_TERMS and term_in_text(term, record["name"].lower())
-            for term, _ in query_terms(query)
-        )
+        explicit_name_match = any(term_in_text(term, record["name"].lower()) for term in name_terms)
         if relevance < 2 and not explicit_name_match:
             continue
         before = len(selected)
