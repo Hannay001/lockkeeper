@@ -337,9 +337,21 @@ def run(args: argparse.Namespace) -> int:
             judged = decision.outcome.scores if decision.outcome and not decision.outcome.error else {}
             # The provider's own order over its shortlist, then everything else as ranked.
             shortlist = [pair for pair in ranked if pair[1]["id"] in judged]
-            pure = sorted(shortlist, key=lambda pair: -judged[pair[1]["id"]]) + [
-                pair for pair in ranked if pair[1]["id"] not in judged
-            ]
+            rest = [pair for pair in ranked if pair[1]["id"] not in judged]
+            pure = sorted(shortlist, key=lambda pair: -judged[pair[1]["id"]]) + rest
+            # The same blend, confined to the shortlist: rows the provider never saw
+            # cannot overtake the rows it judged.
+            # Uses `scores`, which is empty when the run abstained, exactly like blend().
+            top = max((score for score, _record in shortlist), default=0.0)
+            local = (
+                sorted(
+                    shortlist,
+                    key=lambda pair: -((1 - settings.weight) * pair[0] + settings.weight * scores[pair[1]["id"]] * top),
+                )
+                + rest
+                if scores
+                else ranked
+            )
             decided = registry.bundle(
                 records, query, args.runtime, "", args.max, output, verify_sources=True, decision=decision
             )
@@ -347,7 +359,13 @@ def run(args: argparse.Namespace) -> int:
             row.update(
                 {
                     "decision": score_ranking(ids_of(blended), label),
+                    "decision_local": score_ranking(ids_of(local), label),
                     "provider_only": score_ranking(ids_of(pure), label),
+                    # Enough to recompute any blend offline without re-running the model.
+                    "shortlist": [
+                        [skill_of(record), round(score, 3), judged[record["id"]]] for score, record in shortlist
+                    ],
+                    "ranked_top100": [[skill_of(record), round(score, 3)] for score, record in ranked[:100]],
                     "decision_bundle": score_bundle([skill_of(item) for item in decided["bundle"]], label),
                     "shortlist_recall": len(set(label["gt"]) & {skill_of(r) for _s, r in shortlist})
                     / len(label["gt"]),
@@ -384,7 +402,7 @@ def run(args: argparse.Namespace) -> int:
         },
         "summary": {
             side: mean_metrics(rows, side)
-            for side in ("baseline", "decision", "provider_only", "baseline_bundle", "decision_bundle")
+            for side in ("baseline", "decision", "decision_local", "provider_only", "baseline_bundle", "decision_bundle")
             if any(side in row for row in rows)
         },
         "latency_ms": {
@@ -416,7 +434,7 @@ def print_report(report: dict[str, Any]) -> None:
     if report["rebuild_seconds"] is not None:
         print(f"rebuild {report['rebuild_seconds']:.1f}s, registry load {report['registry_load_seconds']:.1f}s")
     summary = report["summary"]
-    sides = [side for side in ("baseline", "decision", "provider_only") if side in summary]
+    sides = [side for side in ("baseline", "decision", "decision_local", "provider_only") if side in summary]
     metrics = ["hit@1", "mrr", "ndcg@10", *(f"recall@{cutoff}" for cutoff in RANK_CUTOFFS[1:])]
     print(f"\n{'ranking':<14}" + "".join(f"{side:>15}" for side in sides))
     for metric in metrics:
