@@ -5,13 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lockkeeper"
 version = "1.1.2"
-description = "npm for your agent's context: cross-runtime capability routing with a built-in prompt-injection firewall."
+description = "Skill router and prompt-injection firewall for AI coding agents: give Claude Code, Codex and Cursor the right skills, MCP servers and tools for each task."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Himanshu", email = "173780478+Hannay001@users.noreply.github.com" }]
 maintainers = [{ name = "Himanshu", email = "173780478+Hannay001@users.noreply.github.com" }]
-keywords = ["agents", "skills", "mcp", "prompt-injection", "security", "cli"]
+keywords = [
+    "ai-agents", "agent-skills", "skills", "skill-md", "claude-code", "codex", "cursor", "mcp",
+    "model-context-protocol", "mcp-server", "context-window", "llm", "router", "prompt-injection",
+    "security", "cli",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
@@ -24,6 +28,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Security",
     "Topic :: Software Development :: Build Tools",
 ]
@@ -31,7 +36,9 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/Hannay001/lockkeeper"
 Issues = "https://github.com/Hannay001/lockkeeper/issues"
-Roadmap = "https://github.com/Hannay001/lockkeeper/blob/main/ROADMAP.md"
+Documentation = "https://github.com/Hannay001/lockkeeper#documentation"
+Benchmark = "https://github.com/Hannay001/lockkeeper/blob/main/docs/BENCHMARK.md"
+Changelog = "https://github.com/Hannay001/lockkeeper/blob/main/ROADMAP.md"
 
 [project.scripts]
 lockkeeper = "capability_registry:main"
