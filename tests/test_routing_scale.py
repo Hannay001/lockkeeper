@@ -1,9 +1,11 @@
-"""Routing real agent prompts: long prompts are routed (clipped), not refused."""
+"""Routing real agent prompts: namesakes stay visible, and long prompts are routed
+(clipped), not refused."""
 from __future__ import annotations
 
 import argparse
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +16,72 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import capability_registry as registry  # noqa: E402
+
+
+def skill(name: str, description: str, category: str = "software-engineering", runtimes=("claude",)) -> dict:
+    return {
+        "id": f"skill:{name}",
+        "type": "skill",
+        "name": name,
+        "description": description,
+        "category": category,
+        "status": "active",
+        "runtimes": list(runtimes),
+        "source_path": f"/skills/{name}/SKILL.md",
+        "registration_count": 1,
+        "owner": "",
+    }
+
+
+def mcp(name: str, description: str) -> dict:
+    return {**skill(name, description), "id": f"mcp:{name}", "type": "mcp", "source_path": ""}
+
+
+RECORDS = [
+    skill("cpp-memory", "Find C++ memory leaks with valgrind and sanitizers"),
+    skill("node-api", "Build a node.js REST API server with express"),
+    skill("dotnet-build", "Fix .NET build errors and msbuild warnings"),
+    skill("kuendigung", "Kündigung schreiben: Mietvertrag und Arbeitsvertrag kündigen"),
+    skill("pdf-tables", "Extract tables from scanned PDF documents with OCR"),
+    skill("csv-plot", "Analyze CSV data and plot charts"),
+    skill("security-audit", "Audit authentication code for vulnerabilities", "testing-security"),
+    skill("scala-translate", "Translate Python code to idiomatic Scala"),
+    skill("git-commit", "Write conventional git commit messages"),
+    skill("ci-cd", "Set up ci-cd pipelines with GitHub Actions"),
+    skill("react-perf", "Profile React component performance and re-renders"),
+    skill("terraform-aws", "Provision AWS infrastructure with Terraform"),
+    skill("docs-writer", "Write project documentation and READMEs"),
+    skill("investor-email", "Draft investor outreach emails"),
+    skill("market-research", "Check the competitive landscape and market"),
+    mcp("github", "GitHub pull requests, issues and code review"),
+    *(skill(f"filler-{index}", f"generic helper number {index} for data and files") for index in range(30)),
+]
+
+def ranking(records: list[dict], query: str, output: Path) -> list[tuple[str, float]]:
+    return [(record["id"], score) for score, record in registry.ranked_records(records, query, "claude", output)]
+
+
+class NamesakeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory(prefix="lockkeeper-namesake-")
+        self.addCleanup(directory.cleanup)
+        self.output = Path(directory.name)
+
+    def test_different_skills_that_share_a_name_both_rank(self) -> None:
+        forms = {**skill("pdf", "Fill PDF forms and read form fields"), "id": "skill:namesake-forms"}
+        tables = {**skill("pdf", "Pull tables out of PDF reports into CSV"), "id": "skill:namesake-tables"}
+        ids = [rid for rid, _ in ranking([forms, tables, *RECORDS], "pdf", self.output)]
+        self.assertIn("skill:namesake-forms", ids)
+        self.assertIn("skill:namesake-tables", ids)
+
+    def test_copies_of_one_skill_still_rank_once(self) -> None:
+        claude_copy = {**skill("pdf-tables", "Extract tables from PDF reports"), "id": "skill:pdf:claude"}
+        shared_copy = {
+            **skill("PDF-Tables", "Extract  tables from PDF reports", runtimes=("shared",)),
+            "id": "skill:pdf:shared",
+        }
+        ranked = ranking([claude_copy, shared_copy, *RECORDS], "extract tables from pdf", self.output)
+        self.assertEqual(sum(rid in {"skill:pdf:claude", "skill:pdf:shared"} for rid, _ in ranked), 1)
 
 
 class LongQueryTest(unittest.TestCase):

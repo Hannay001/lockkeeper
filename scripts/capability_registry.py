@@ -4509,14 +4509,31 @@ def ranked_records(
         key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]),
     )
     unique: list[tuple[float, dict[str, Any]]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for score, record in ordered:
-        key = (record["type"], record["name"].lower())
+        key = duplicate_key(record)
         if key in seen:
             continue
         seen.add(key)
         unique.append((score, record))
     return unique
+
+
+def duplicate_key(record: dict[str, Any]) -> tuple[str, str, str]:
+    """Rows that are copies of ONE capability share this key; namesakes do not.
+
+    The same skill installed for several runtimes (a Claude copy and a shared copy)
+    is one capability and should rank once. A different skill that merely has the
+    same name is not: keyed on the name alone, 40 unrelated skills called "pdf"
+    collapsed into whichever scored highest, and the one the task needed vanished
+    from the ranking (38 of 47 unranked ground-truth skills on the 26k-skill
+    SkillRouter benchmark). The bundle still takes at most one per name.
+    """
+    return (
+        record["type"],
+        record["name"].lower(),
+        " ".join(str(record.get("description") or "").lower().split()),
+    )
 
 
 def roll_up_resources(

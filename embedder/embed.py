@@ -216,6 +216,17 @@ def _is_non_rankable(record: dict) -> bool:
     return record.get("rankable") is False
 
 
+def duplicate_key(record: dict) -> tuple[str, str, str]:
+    """Copies of one capability (the same skill registered for several runtimes)
+    share this key; different capabilities that merely share a name do not.
+    Mirrors capability_registry.duplicate_key()."""
+    return (
+        str(record["type"]),
+        str(record["name"]).lower(),
+        " ".join(str(record.get("description") or "").lower().split()),
+    )
+
+
 def runtime_grouped_hits(
     index_ids: list[str],
     scores,
@@ -240,20 +251,20 @@ def runtime_grouped_hits(
         for record in records
         if record.get("id") and record.get("name") and record.get("type")
     }
-    eligible_members: dict[tuple[str, str], list[dict]] = {}
+    eligible_members: dict[tuple[str, str, str], list[dict]] = {}
     for record in records_by_id.values():
         runtimes = record.get("runtimes") or []
         if runtime and runtime not in runtimes and "shared" not in runtimes:
             continue
-        key = (str(record["type"]), str(record["name"]).lower())
+        key = duplicate_key(record)
         eligible_members.setdefault(key, []).append(record)
 
-    group_scores: dict[tuple[str, str], float] = {}
+    group_scores: dict[tuple[str, str, str], float] = {}
     for record_id, score in zip(index_ids, scores, strict=True):
         record = records_by_id.get(str(record_id))
         if record is None:
             continue
-        key = (str(record["type"]), str(record["name"]).lower())
+        key = duplicate_key(record)
         if key not in eligible_members:
             continue
         numeric_score = float(score)
