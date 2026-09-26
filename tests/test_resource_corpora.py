@@ -174,7 +174,22 @@ class CommonTermQueryTest(unittest.TestCase):
         pool = [*self.pool(), {"name": "pytest-fixtures", "description": "fixture factories"}]
         damped = dict(registry.damped_query_terms(registry.query_terms("python fixture"), pool))
         self.assertLess(damped["python"], 1.0)
-        self.assertEqual(damped["fixture"], 1.0)
+        self.assertGreaterEqual(damped["fixture"], 1.0)
+
+    def test_rarer_terms_weigh_more(self) -> None:
+        pool = [
+            *self.pool(200),
+            *({"name": f"csv-{index}", "description": "csv reports"} for index in range(8)),
+            {"name": "wyckoff", "description": "wyckoff positions of crystal structures"},
+        ]
+        damped = dict(registry.damped_query_terms(registry.query_terms("wyckoff csv python"), pool))
+        self.assertGreater(damped["wyckoff"], damped["csv"])
+        self.assertGreater(damped["csv"], damped["python"])
+
+    def test_soft_terms_are_never_boosted(self) -> None:
+        pool = [*self.pool(), {"name": "summarizer", "description": "summarize meeting notes"}]
+        damped = dict(registry.damped_query_terms(registry.query_terms("summarize notes"), pool))
+        self.assertLessEqual(damped["summarize"], registry.SOFT_TERM_WEIGHT)
 
 
 if __name__ == "__main__":

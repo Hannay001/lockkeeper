@@ -20,6 +20,7 @@ except ImportError:  # Windows: no fcntl; best-effort exclusive lock via msvcrt
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -4509,11 +4510,15 @@ def lexical_scores(
 def damped_query_terms(
     terms: list[tuple[str, float]], pool: list[dict[str, Any]]
 ) -> list[tuple[str, float]]:
-    """Damp terms that match a large fraction of the pool -- they cannot discriminate.
+    """Weight each term by how rare it is in the pool (inverse document frequency).
 
-    Cheap inverse-document-frequency: a term present in >IDF_DAMP_RATIO of candidates
-    contributes at IDF_DAMP_FACTOR of its weight. Damped, never zeroed, so a query made
-    entirely of common terms still ranks something.
+    A term found in IDF_DAMP_RATIO of the pool keeps its weight. Rarer terms weigh
+    more -- in a 26k-skill pool a term in 3 skills weighs ~3x one in 5% -- and
+    commoner terms less, down to IDF_DAMP_FACTOR: damped, never zeroed, so a query
+    made entirely of common terms still ranks something. A long task mixes a few
+    decisive words ("wyckoff", "pcap", "shelx") with dozens of ordinary ones; a flat
+    weight let the ordinary ones outvote them. Soft terms and expansions (weight
+    below 1) are damped but never boosted, so they still cannot decide a ranking.
     """
     total = len(pool) or 1
     if total < 20:
@@ -4521,11 +4526,14 @@ def damped_query_terms(
     index = _lexical_index(pool) if total >= LEXICAL_INDEX_MIN_POOL else None
     blobs: Optional[list[str]] = None
     threshold = total * IDF_DAMP_RATIO
+    reference = math.log((total + 1) / (threshold + 1))
+    # Past this many rows the weight is already at its floor, so counting can stop.
+    floor_count = (total + 1) / math.exp(IDF_DAMP_FACTOR * reference) - 1
     adjusted: list[tuple[str, float]] = []
     rare_content_term = False
     common_content_term = False
     for term, weight in terms:
-        frequency = index.name_description_frequency(term, threshold) if index else None
+        frequency = index.name_description_frequency(term, floor_count) if index else None
         if frequency is None:
             if blobs is None:
                 blobs = [f"{record['name']} {record['description']}".lower() for record in pool]
@@ -4533,9 +4541,11 @@ def damped_query_terms(
             frequency = sum(1 for blob in blobs if head in blob)
         if frequency > threshold:
             common_content_term = common_content_term or weight >= 1.0
-            weight *= IDF_DAMP_FACTOR
         elif frequency and weight >= 1.0:
             rare_content_term = True
+        if frequency:
+            scale = max(IDF_DAMP_FACTOR, math.log((total + 1) / (frequency + 1)) / reference)
+            weight *= scale if weight >= 1.0 else min(scale, 1.0)
         adjusted.append((term, weight))
     # search_score() only counts full-weight terms as real matches. When every
     # content term that occurs in the pool is common, damping them all made every
