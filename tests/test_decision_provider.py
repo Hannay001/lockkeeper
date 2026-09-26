@@ -102,15 +102,42 @@ class BlendTest(unittest.TestCase):
     def test_blend_reorders_but_never_erases(self) -> None:
         ranked = [(100.0, record("a", "")), (60.0, record("b", "")), (40.0, record("c", ""))]
         blended = dp.blend(ranked, {"skill:a": 0.0, "skill:b": 1.0}, 0.5)
-        scores = {row["name"]: score for score, row in blended}
         self.assertEqual([row["name"] for _, row in blended], ["b", "a", "c"])
-        self.assertAlmostEqual(scores["a"], 50.0)
-        self.assertAlmostEqual(scores["b"], 80.0)
-        self.assertAlmostEqual(scores["c"], 40.0, msg="rows the provider did not judge keep their score")
+        self.assertEqual(
+            [score for score, _ in blended],
+            [100.0, 60.0, 40.0],
+            "rows take the score of the position they land in, so the score curve is unchanged",
+        )
+
+    def test_unjudged_rows_never_overtake_the_shortlist(self) -> None:
+        """Regression: rescaling judged scores by (1-w) let every row below the
+        shortlist jump above it whenever the provider's probabilities were all low."""
+        ranked = [(100.0 - index, record(f"r{index}", "")) for index in range(6)]
+        scores = {"skill:r0": 0.02, "skill:r1": 0.03, "skill:r2": 0.01}
+        blended = dp.blend(ranked, scores, 0.5)
+        self.assertEqual({row["name"] for _, row in blended[:3]}, {"r0", "r1", "r2"})
+        self.assertEqual([row["name"] for _, row in blended[3:]], ["r3", "r4", "r5"])
+
+    def test_small_but_ordered_probabilities_still_rerank(self) -> None:
+        """A cross-encoder on a long task: every probability below 0.02, order intact."""
+        ranked = [(90.0, record("a", "")), (88.0, record("b", "")), (86.0, record("c", ""))]
+        blended = dp.blend(ranked, {"skill:a": 0.001, "skill:b": 0.004, "skill:c": 0.019}, 0.5)
+        self.assertEqual([row["name"] for _, row in blended], ["c", "b", "a"])
+
+    def test_interleaved_rows_keep_their_positions(self) -> None:
+        """Rows the provider was not allowed to see (denied, untrusted) stay put."""
+        ranked = [(100.0, record("a", "")), (90.0, record("denied", "")), (80.0, record("b", ""))]
+        blended = dp.blend(ranked, {"skill:a": 0.0, "skill:b": 1.0}, 1.0)
+        self.assertEqual([row["name"] for _, row in blended], ["b", "denied", "a"])
 
     def test_flat_scores_are_an_abstention(self) -> None:
         self.assertTrue(dp.is_flat({"a": 0.51, "b": 0.53}))
+        self.assertTrue(dp.is_flat({"a": 0.0, "b": 0.0}))
+        self.assertTrue(dp.is_flat({"a": 0.9}))
         self.assertFalse(dp.is_flat({"a": 0.2, "b": 0.9}))
+        self.assertFalse(dp.is_flat({"a": 0.001, "b": 0.019}), "small but clearly ordered is not flat")
+        ranked = [(100.0, record("a", "")), (60.0, record("b", ""))]
+        self.assertIs(dp.blend(ranked, {"skill:a": 0.51, "skill:b": 0.53}, 0.5), ranked)
 
 
 class _SystemOneHandler(BaseHTTPRequestHandler):

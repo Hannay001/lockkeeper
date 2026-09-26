@@ -317,7 +317,8 @@ def run(args: argparse.Namespace) -> int:
         if label["task_id"] in reusable:
             rows.append(reusable[label["task_id"]])
             continue
-        query = label["query"]
+        # Route exactly what `lockkeeper route` would: long prompts are clipped, not refused.
+        query = registry.focus_query(label["query"])[0] if hasattr(registry, "focus_query") else label["query"]
         began = time.perf_counter()
         ranked = registry.ranked_records(records, query, args.runtime, output)
         rank_ms = (time.perf_counter() - began) * 1000

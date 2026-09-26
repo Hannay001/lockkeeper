@@ -20,6 +20,7 @@ except ImportError:  # Windows: no fcntl; best-effort exclusive lock via msvcrt
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -617,6 +618,19 @@ SYNTAX_STOPWORDS = {
     "man", "mit", "nach", "nicht", "noch", "nur", "ob", "oder", "ohne", "schon",
     "sein", "sich", "sind", "sowie", "über", "ueber", "um", "und", "unter", "vom",
     "von", "vor", "war", "werden", "wird", "zu", "zum", "zur", "zwischen",
+    # More English function words, modal verbs and prompt filler. Agents route whole
+    # prompts ("You want to ... given a few files ... each result should look like"),
+    # and at full weight these words matched generic trigger-phrase descriptions
+    # ("use when the user wants to look at ...") better than the skill the task needed.
+    "above", "after", "again", "against", "am", "another", "before", "below", "between",
+    "both", "could", "did", "doing", "down", "during", "each", "either", "etc", "every",
+    "few", "further", "given", "had", "he", "her", "here", "hers", "herself", "him",
+    "himself", "his", "itself", "let", "like", "look", "may", "might", "mine", "must",
+    "myself", "neither", "nor", "off", "once", "only", "other", "ought", "ours",
+    "ourselves", "out", "over", "own", "please", "same", "shall", "she", "should",
+    "since", "sure", "themselves", "through", "too", "under", "until", "up", "upon",
+    "very", "want", "wants", "whether", "while", "within", "without", "yet", "yours",
+    "yourself", "yourselves",
 }
 
 # Generic action verbs. Real lane signal ("review" -> verification, "draft" -> output)
@@ -636,6 +650,8 @@ SOFT_TERM_WEIGHT = 0.25
 # discrimination; damp it rather than let it dominate (classic IDF, cheaply applied).
 IDF_DAMP_RATIO = 0.05
 IDF_DAMP_FACTOR = 0.3
+# Points per matched query term (see search_score).
+MATCH_BREADTH_POINTS = 8
 
 
 def utc_now() -> str:
@@ -3575,16 +3591,32 @@ def ensure_query_registry_fresh(output: Path) -> Optional[list[dict[str, Any]]]:
         release()
 
 
+def query_token(raw: str) -> str:
+    """Drop sentence punctuation around a token: "diffraction." and "--" carry none.
+
+    Keeps meaningful symbols: a leading dot (".net", ".env") and "+"/"#" ("c++", "c#").
+    """
+    token = raw.rstrip(".-")
+    return token.lstrip("-") if token.startswith("-") else token
+
+
 def query_terms(query: str) -> list[tuple[str, float]]:
     # Fold umlauts BEFORE tokenizing: the split pattern is ASCII-only and would
     # otherwise shred words like "Kündigungsschreiben" into dead fragments.
     normalized = fold_umlauts(clean_text(query).lower())
-    base = [token for token in re.split(r"[^a-z0-9+#.-]+", normalized) if len(token) > 1]
+    base = [token for token in (query_token(raw) for raw in re.split(r"[^a-z0-9+#.-]+", normalized)) if len(token) > 1]
     weighted: dict[str, float] = {}
     for token in base:
         if token in SYNTAX_STOPWORDS:
             continue  # pure syntax: never a routing signal
         weighted[token] = SOFT_TERM_WEIGHT if token in SOFT_QUERY_TERMS else 1.0
+        # A dotted token is a file, module or host name: "packets.pcap", "solution.py",
+        # "mp-226.cif". Its parts, above all the extension, are what a skill describes
+        # ("pcap", "py", "cif"), and the whole token matches almost nothing.
+        if "." in token.strip("."):
+            for part in re.split(r"[.-]+", token):
+                if len(part) > 1 and not part.isdigit() and part not in SYNTAX_STOPWORDS:
+                    weighted.setdefault(part, SOFT_TERM_WEIGHT if part in SOFT_QUERY_TERMS else 1.0)
     expansions = [
         ({"ocr", "scanned"}, ["pdf", "document", "extract", "surya", "markitdown"]),
         ({"cofounder", "candidate"}, ["talent", "recruit", "outreach", "researcher"]),
@@ -3598,7 +3630,14 @@ def query_terms(query: str) -> list[tuple[str, float]]:
             continue
         for addition in additions:
             weighted.setdefault(addition, 0.55)
-    return list(weighted.items())
+    # "structure" and "structures" match the same words (term_forms); counting both
+    # would score one concept twice.
+    merged: dict[tuple[str, tuple[str, ...]], str] = {}
+    terms: dict[str, float] = {}
+    for token, weight in weighted.items():
+        first = merged.setdefault(term_forms(token), token)
+        terms[first] = max(terms.get(first, 0.0), weight)
+    return list(terms.items())
 
 
 UMLAUT_FOLDING = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
@@ -3633,6 +3672,47 @@ def _term_pattern(term: str) -> re.Pattern[str]:
 
 def term_in_text(term: str, text: str) -> bool:
     return _term_pattern(term).search(fold_umlauts(text)) is not None
+
+
+@lru_cache(maxsize=8192)
+def term_forms(term: str) -> tuple[str, tuple[str, ...]]:
+    """(head, tails): a query term matches a whole word spelled head + one of tails.
+
+    Light English plural folding, so "structures" finds "structure", "pdf" finds
+    "PDFs" and "dependencies" finds "dependency" -- and a singular and a plural
+    query term reduce to the same forms. Terms with digits or symbols ("c++",
+    "node.js", "3d"), two-letter terms, and three-letter terms ending in "s"
+    ("aws", "css", "dns") match exactly.
+    """
+    if len(term) < 3 or not (term.isascii() and term.isalpha()) or (len(term) == 3 and term.endswith("s")):
+        return term, ("",)
+    if len(term) == 3:
+        return term, ("es", "s", "")
+    if term.endswith("ies"):
+        return term[:-3], ("ies", "ie", "y")
+    if term.endswith("y") and term[-2] not in "aeiou":
+        return term[:-1], ("ies", "ie", "y")
+    if term.endswith(("sses", "ches", "shes", "xes", "zes")):
+        return term[:-2], ("es", "")
+    if term.endswith(("ss", "ch", "sh", "x", "z")):
+        return term, ("es", "")
+    if term.endswith("s") and not term.endswith(("us", "is")):
+        return term[:-1], ("es", "s", "")
+    return term, ("es", "s", "")
+
+
+@lru_cache(maxsize=8192)
+def _term_forms_pattern(term: str) -> re.Pattern[str]:
+    """Whole-word matcher for term_forms(term), literal-first like _term_pattern()."""
+    head, tails = term_forms(fold_umlauts(term))
+    escaped = re.escape(head)
+    alternatives = "|".join(re.escape(tail) for tail in tails)
+    return re.compile(rf"{escaped}(?<![a-z0-9]{escaped})(?:{alternatives})(?![a-z0-9])")
+
+
+def term_matches(term: str, folded_text: str) -> bool:
+    """term_in_text() with plural folding; folded_text must already be umlaut-folded."""
+    return _term_forms_pattern(term).search(folded_text) is not None
 
 
 @lru_cache(maxsize=64)
@@ -3701,19 +3781,24 @@ def search_score(
         direct_matches += 1
         base_matches += 1
     for term, weight in terms or query_terms(query):
-        # Equivalent to term_in_text(term, field) on the pre-folded fields above.
-        matches = _term_pattern(term).search
+        # term_matches() on the pre-folded fields above: whole words, plural forms folded.
+        pattern = _term_forms_pattern(term)
+        matches = pattern.search
         in_alias = bool(alias_text) and matches(folded_alias) is not None
+        # The pre-check compares the term's head with the FOLDED fields. Query terms are
+        # umlaut-folded, and against the raw fields no word written with an umlaut
+        # ("Kündigung") could ever match.
+        head = term_forms(term)[0]
         if (
             not in_alias
-            and term not in name
-            and term not in description
-            and term not in source
-            and term not in category
+            and head not in folded_name
+            and head not in folded_description
+            and head not in folded_source
+            and head not in folded_category
         ):
             continue
         matched = False
-        if name == term:
+        if pattern.fullmatch(folded_name) is not None:
             score += 40 * weight
             matched = True
         elif matches(folded_name) is not None:
@@ -3743,7 +3828,13 @@ def search_score(
                 base_matches += 1
     if direct_matches == 0 or base_matches == 0:
         return 0.0
-    score += direct_matches * direct_matches * 2
+    # Breadth of match counts, linearly. The old bonus grew with the SQUARE of the
+    # matched terms: harmless for a 4-word query (it is the same 32 points at four
+    # matches), but on a 60-term task a generic skill matching 15 ordinary words
+    # got +450, outscoring the specific skill the task named. Linear keeps short
+    # queries nearly unchanged and fixed that (benchmark Hit@1 0.44 -> 0.51,
+    # stable for 4-12 points per match).
+    score += direct_matches * MATCH_BREADTH_POINTS
     if runtime in record["runtimes"]:
         score += 8
     if "shared" in record["runtimes"]:
@@ -4207,14 +4298,15 @@ class _TokenPostings:
             found = text.find(needle, starts[index] + len(tokens[index]) + 1)
 
     def positions_matching(self, term: str, folded: str) -> set[int]:
-        """Positions where term_in_text(term, ...) holds for some indexed text, a superset.
+        """Positions where term_matches(term, ...) holds for some indexed text, a superset.
 
         Tokens are maximal runs of the term's own character class, so a whole-word
-        match inside the text is a whole-word match inside one token.
+        match inside the text is a whole-word match inside one token -- and every
+        word form of the term contains its head.
         """
-        pattern = _term_pattern(term)
+        pattern = _term_forms_pattern(term)
         positions: set[int] = set()
-        for token in self.tokens_containing(folded):
+        for token in self.tokens_containing(term_forms(folded)[0]):
             if pattern.search(token) is not None:
                 positions.update(self.postings[token])
         return positions
@@ -4256,8 +4348,8 @@ class _AliasIndex:
 class _LexicalIndex:
     """Token postings over one ranking pool, so a query only touches records it can match.
 
-    search_score() credits a term only where it occurs as a whole word (term_in_text) in
-    a field, and a record no full-weight term or alias phrase matches scores exactly 0.0.
+    search_score() credits a term only where one of its word forms occurs as a whole
+    word (term_matches) in a field, and a record no full-weight term or alias phrase matches scores exactly 0.0.
     Looking terms up here finds the records a query can score -- a superset, which
     search_score() then scores exactly -- in time proportional to the matches instead of
     terms x records. Built once per distinct pool and reused across ranking passes: a
@@ -4286,16 +4378,17 @@ class _LexicalIndex:
         self._aliases: list[_AliasIndex] = []
 
     def name_description_frequency(self, term: str, threshold: float) -> Optional[int]:
-        """How many rows contain term in "name description", counted only until the
-        count exceeds threshold (all damped_query_terms() compares). None when term is
-        not a token-class string, so its occurrences need not sit inside one token."""
+        """How many rows contain the term's head (term_forms) in "name description",
+        counted only until the count exceeds threshold (all damped_query_terms()
+        compares). None when term is not a token-class string, so its occurrences need
+        not sit inside one token."""
         if not _TOKEN_RE.fullmatch(term):
             return None
         key = (term, threshold)
         cached = self._frequencies.get(key)
         if cached is None:
             rows: set[int] = set()
-            for token in self.name_description.tokens_containing(term):
+            for token in self.name_description.tokens_containing(term_forms(term)[0]):
                 rows.update(self.name_description.postings[token])
                 if len(rows) > threshold:
                     break
@@ -4410,7 +4503,7 @@ def lexical_scores(
             extra = extra_by_category[category] = [
                 term_index
                 for term_index, (term, _weight) in enumerate(resolved)
-                if _term_pattern(term).search(title) is not None
+                if _term_forms_pattern(term).search(title) is not None
             ] + unindexed
         term_indexes = relevant.get(position, [])
         if extra:
@@ -4425,11 +4518,15 @@ def lexical_scores(
 def damped_query_terms(
     terms: list[tuple[str, float]], pool: list[dict[str, Any]]
 ) -> list[tuple[str, float]]:
-    """Damp terms that match a large fraction of the pool -- they cannot discriminate.
+    """Weight each term by how rare it is in the pool (inverse document frequency).
 
-    Cheap inverse-document-frequency: a term present in >IDF_DAMP_RATIO of candidates
-    contributes at IDF_DAMP_FACTOR of its weight. Damped, never zeroed, so a query made
-    entirely of common terms still ranks something.
+    A term found in IDF_DAMP_RATIO of the pool keeps its weight. Rarer terms weigh
+    more -- in a 26k-skill pool a term in 3 skills weighs ~3x one in 5% -- and
+    commoner terms less, down to IDF_DAMP_FACTOR: damped, never zeroed, so a query
+    made entirely of common terms still ranks something. A long task mixes a few
+    decisive words ("wyckoff", "pcap", "shelx") with dozens of ordinary ones; a flat
+    weight let the ordinary ones outvote them. Soft terms and expansions (weight
+    below 1) are damped but never boosted, so they still cannot decide a ranking.
     """
     total = len(pool) or 1
     if total < 20:
@@ -4437,20 +4534,26 @@ def damped_query_terms(
     index = _lexical_index(pool) if total >= LEXICAL_INDEX_MIN_POOL else None
     blobs: Optional[list[str]] = None
     threshold = total * IDF_DAMP_RATIO
+    reference = math.log((total + 1) / (threshold + 1))
+    # Past this many rows the weight is already at its floor, so counting can stop.
+    floor_count = (total + 1) / math.exp(IDF_DAMP_FACTOR * reference) - 1
     adjusted: list[tuple[str, float]] = []
     rare_content_term = False
     common_content_term = False
     for term, weight in terms:
-        frequency = index.name_description_frequency(term, threshold) if index else None
+        frequency = index.name_description_frequency(term, floor_count) if index else None
         if frequency is None:
             if blobs is None:
                 blobs = [f"{record['name']} {record['description']}".lower() for record in pool]
-            frequency = sum(1 for blob in blobs if term in blob)
+            head = term_forms(term)[0]  # "structures" and "structure" are one term
+            frequency = sum(1 for blob in blobs if head in blob)
         if frequency > threshold:
             common_content_term = common_content_term or weight >= 1.0
-            weight *= IDF_DAMP_FACTOR
         elif frequency and weight >= 1.0:
             rare_content_term = True
+        if frequency:
+            scale = max(IDF_DAMP_FACTOR, math.log((total + 1) / (frequency + 1)) / reference)
+            weight *= scale if weight >= 1.0 else min(scale, 1.0)
         adjusted.append((term, weight))
     # search_score() only counts full-weight terms as real matches. When every
     # content term that occurs in the pool is common, damping them all made every
@@ -4509,14 +4612,31 @@ def ranked_records(
         key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]),
     )
     unique: list[tuple[float, dict[str, Any]]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for score, record in ordered:
-        key = (record["type"], record["name"].lower())
+        key = duplicate_key(record)
         if key in seen:
             continue
         seen.add(key)
         unique.append((score, record))
     return unique
+
+
+def duplicate_key(record: dict[str, Any]) -> tuple[str, str, str]:
+    """Rows that are copies of ONE capability share this key; namesakes do not.
+
+    The same skill installed for several runtimes (a Claude copy and a shared copy)
+    is one capability and should rank once. A different skill that merely has the
+    same name is not: keyed on the name alone, 40 unrelated skills called "pdf"
+    collapsed into whichever scored highest, and the one the task needed vanished
+    from the ranking (38 of 47 unranked ground-truth skills on the 26k-skill
+    SkillRouter benchmark). The bundle still takes at most one per name.
+    """
+    return (
+        record["type"],
+        record["name"].lower(),
+        " ".join(str(record.get("description") or "").lower().split()),
+    )
 
 
 def roll_up_resources(
@@ -5680,17 +5800,45 @@ class RegistryArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: error: {safe_message}\n")
 
 
+MAX_QUERY_CHARS = 16_384
+MAX_QUERY_TERMS = 256
+# Read limit for --stdin: enough to see that a pasted prompt is long, never unbounded.
+MAX_QUERY_INPUT_CHARS = 262_144
+
+
+def focus_query(raw: str) -> tuple[str, bool]:
+    """Clip a long task to what routing reads: MAX_QUERY_CHARS characters, then the
+    text before the (MAX_QUERY_TERMS + 1)-th distinct term. Returns (query, clipped).
+
+    Agents route whole user prompts, which run to hundreds of words and can carry
+    pasted logs. The task is almost always stated first, so routing on the opening
+    of a long prompt beats refusing it (this used to fail above 64 words).
+    """
+    query = clean_text(raw)
+    clipped = False
+    if len(query) > MAX_QUERY_CHARS:
+        query, clipped = query[:MAX_QUERY_CHARS].rstrip(), True
+    seen: set[str] = set()
+    for match in re.finditer(r"[A-Za-z0-9+#.-]+", query):
+        seen.add(match.group(0).lower())
+        if len(seen) > MAX_QUERY_TERMS:
+            query, clipped = query[: match.start()].rstrip(), True
+            break
+    return query, clipped
+
+
 def query_from_args(args: argparse.Namespace) -> str:
     if args.read_stdin and args.query:
         raise RuntimeError("use either positional query terms or --stdin, not both")
-    raw = sys.stdin.read(4_097) if args.read_stdin else " ".join(args.query)
-    if len(raw) > 4_096:
-        raise RuntimeError("query exceeds 4,096 characters")
-    query = clean_text(raw)
+    raw = sys.stdin.read(MAX_QUERY_INPUT_CHARS) if args.read_stdin else " ".join(args.query)
+    query, clipped = focus_query(raw)
     if not query:
         raise RuntimeError("query must contain at least one non-whitespace term")
-    if len(re.findall(r"[A-Za-z0-9+#.-]+", query)) > 64:
-        raise RuntimeError("query exceeds 64 searchable terms; provide a focused task summary")
+    if clipped:
+        _warn_once(
+            f"long query: routed on its first {len(query):,} characters "
+            f"(limits: {MAX_QUERY_CHARS:,} characters, {MAX_QUERY_TERMS} distinct terms)"
+        )
     return query
 
 
