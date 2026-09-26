@@ -10,7 +10,7 @@ if [ -z "${PREFIX:-}" ] && [ -z "${HOME:-}" ]; then
 fi
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 mkdir -p "$PREFIX"
-for name in cap capability-registry; do
+for name in lockkeeper cap capability-registry; do
     if [ -d "$PREFIX/$name" ]; then
         echo "error: $PREFIX/$name exists and is a directory; remove it first" >&2
         exit 1
@@ -22,20 +22,20 @@ ln -sfn "$REPO_ROOT/scripts/capability-registry" "$PREFIX/cap"  # deprecated ali
 ln -sfn "$REPO_ROOT/scripts/capability-registry" "$PREFIX/capability-registry"
 
 # Auto-bind: detect every harness on this machine and write local bindings.
-# Selective: ./install.sh --runtimes claude,codex   Skip: CAP_NO_INIT=1.
+# Selective: CAP_RUNTIMES=claude,codex ./install.sh   Skip: CAP_NO_INIT=1.
 if [ "${CAP_NO_INIT:-}" != "1" ]; then
     echo
     echo "Detecting installed agent harnesses..."
     if [ -n "${CAP_RUNTIMES:-}" ]; then
-        "$PREFIX/cap" init --runtimes "$CAP_RUNTIMES" || true
+        "$PREFIX/lockkeeper" init --runtimes "$CAP_RUNTIMES" || true
     else
-        "$PREFIX/cap" init || true
+        "$PREFIX/lockkeeper" init || true
     fi
 fi
 
 echo "Installed:"
-echo "  $PREFIX/cap"
-echo "  $PREFIX/capability-registry (alias)"
+echo "  $PREFIX/lockkeeper"
+echo "  $PREFIX/cap, $PREFIX/capability-registry (legacy aliases)"
 echo
 echo "Next steps:"
 echo "  lockkeeper snapshot-runtimes && lockkeeper rebuild && lockkeeper doctor"

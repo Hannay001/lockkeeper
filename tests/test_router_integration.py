@@ -369,7 +369,7 @@ class IsolatedRegistryTest(unittest.TestCase):
         ):
             registry.ensure_query_registry_fresh(output)
 
-        snapshots.assert_called_once_with()
+        snapshots.assert_called_once_with(budget_seconds=registry.SNAPSHOT_AUTOHEAL_BUDGET_SECONDS)
         rebuild.assert_called_once_with(output, quiet=True)
         # Recovery re-embeds under its own short budget. Skipping it used to leave
         # the fingerprint moved and every vector invalid, so routing silently ran
@@ -658,6 +658,7 @@ class RouterCliProjectSelectorTest(unittest.TestCase):
         for filename in (
             "capability_registry.py",
             "router_config.py",
+            "decision_provider.py",
             "build_aliases.py",
             "build_synonym_batches.py",
             "build_audit_corpus.py",
@@ -698,7 +699,7 @@ class RouterCliProjectSelectorTest(unittest.TestCase):
             import capability_registry as registry
 
             registry.assert_registry_fresh = lambda *args, **kwargs: None
-            registry.load_registry = lambda output: []
+            registry.load_registry = lambda output, **kwargs: []
             registry.emit_bundle = lambda result, as_json: None
 
             def bundle(records, query, runtime, project, max_count, output, **kwargs):
@@ -873,6 +874,7 @@ class SupportedPythonCliContractTest(unittest.TestCase):
         for filename in (
             "capability_registry.py",
             "router_config.py",
+            "decision_provider.py",
             "capability-registry",
             "capability-catalog.mjs",
         ):
@@ -1060,7 +1062,7 @@ class PolicyPackTest(unittest.TestCase):
         self.root = (Path(self._temporary_directory.name) / "router").resolve(strict=False)
         scripts = self.root / "scripts"
         scripts.mkdir(parents=True)
-        for filename in ("capability_registry.py", "router_config.py"):
+        for filename in ("capability_registry.py", "router_config.py", "decision_provider.py"):
             shutil.copy2(REPOSITORY_ROOT / "scripts" / filename, scripts / filename)
 
     def _load_module(self):
@@ -1108,7 +1110,7 @@ class PolicyPackBehaviorTest(unittest.TestCase):
         scripts = self.router_root / "scripts"
         scripts.mkdir(parents=True)
         (self.router_root / "config").mkdir()
-        for filename in ("capability_registry.py", "router_config.py"):
+        for filename in ("capability_registry.py", "router_config.py", "decision_provider.py"):
             shutil.copy2(REPOSITORY_ROOT / "scripts" / filename, scripts / filename)
         (self.router_root / "data" / "snapshots").mkdir(parents=True)
         self._saved_path = sys.path[:]
@@ -1570,6 +1572,9 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
         """A slow or broken embed must never turn recovery into an outage."""
         output = registry.ROUTER_CONFIG.output_dir
         output.mkdir(parents=True, exist_ok=True)
+        interpreter = registry.semantic_interpreter(output)
+        interpreter.parent.mkdir(parents=True, exist_ok=True)
+        interpreter.touch()
         stale = RuntimeError(
             "Runtime configuration changed after the registry was built; run snapshot-runtimes, then rebuild"
         )
@@ -1585,6 +1590,26 @@ class DegradedRouterVisibilityTest(IsolatedRegistryTest):
 
         reindex.assert_called_once()
         self.assertIn("lexical-only", stderr.getvalue())
+
+    def test_autoheal_without_a_semantic_sidecar_does_not_claim_degradation(self) -> None:
+        """Lexical-only installs never had vectors; warning about losing them is noise."""
+        output = registry.ROUTER_CONFIG.output_dir
+        output.mkdir(parents=True, exist_ok=True)
+        stale = RuntimeError(
+            "Runtime configuration changed after the registry was built; run snapshot-runtimes, then rebuild"
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(registry, "assert_registry_fresh", side_effect=[stale, stale, [], []]),
+            mock.patch.object(registry, "refresh_runtime_snapshots"),
+            mock.patch.object(registry, "rebuild"),
+            mock.patch.object(registry, "reindex_semantic", return_value=False),
+            contextlib.redirect_stderr(stderr),
+        ):
+            registry.ensure_query_registry_fresh(output)
+
+        self.assertFalse(registry.semantic_interpreter(output).exists())
+        self.assertNotIn("lexical-only", stderr.getvalue())
 
     def test_autoheal_success_does_not_claim_degradation(self) -> None:
         output = registry.ROUTER_CONFIG.output_dir

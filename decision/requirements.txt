@@ -1,0 +1,5 @@
+# Decision sidecar dependencies. Install only the backend you use, in its own venv.
+# Cross-encoder backend (small, CPU-friendly; shares fastembed with embedder/):
+fastembed>=0.8.1
+# Laya backend (pulls torch + transformers; ~1 GB with weights):
+# laya>=0.3.20

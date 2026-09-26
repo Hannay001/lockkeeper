@@ -53,13 +53,14 @@ flowchart LR
     T["Task"] --> Q["Query builder<br/>(runtime perspective)"]
     Q --> S["Lexical scoring<br/>over one shared index"]
     S --> O["Semantic re-rank<br/>(optional sidecar)"]
-    O --> P["Policy pack<br/>deny lists + required lanes"]
+    O --> D["Decision provider<br/>(optional: Laya, Jev,<br/>cross-encoder)"]
+    D --> P["Policy pack<br/>deny lists + required lanes"]
     P --> B["Bounded portfolio<br/>max N entries"]
     B --> F["Runtime filter<br/>executable here only"]
     F --> R["Routed bundle"]
 ```
 
-One index spans every harness on your machine. Queries refresh stale registries automatically, invalid config fails loudly instead of guessing, and each runtime receives only capabilities it can genuinely execute.
+One index spans every harness on your machine. Queries notice new, removed, or updated skills, agents, commands, and plugins, plus real MCP/plugin configuration changes, and refresh the registry themselves. Invalid config fails loudly instead of guessing. Each runtime receives only capabilities it can genuinely execute.
 
 ## Why
 
@@ -97,7 +98,7 @@ flowchart LR
     C -.-> Rc["HMAC-SHA256<br/>signed receipt"]
 ```
 
-It detects instruction-override phrasing, exfiltration pipelines (secrets → curl/wget/nc), credential-store access, obfuscated execution (`base64 -d | sh`), destructive commands, hidden directive comments, and invisible or homoglyph Unicode. Executable payloads (`.pyc`, `.so`, `.dll`, `.wasm`) inside an audited directory can't be text-scanned, so they're hashed and floored to at least `suspect`: a skill that ships bytecode never audits clean.
+It detects instruction-override phrasing, exfiltration pipelines (secrets → curl/wget/nc, including PowerShell `iwr | iex`), credential-store access, obfuscated execution (`base64 -d | sh`), destructive commands, hidden directive comments, and invisible or homoglyph Unicode. It scans Markdown, JSON/TOML/YAML, and common script and config types (shell, PowerShell, batch, Python, JS/TS, Ruby, `.env`, Makefiles, and any file with a shebang). Executable payloads (`.pyc`, `.so`, `.dll`, `.wasm`) inside an audited directory can't be text-scanned, so they're hashed and floored to at least `suspect`: a skill that ships bytecode never audits clean. A symlink that points outside the audited directory is flagged too, since its target was never scanned.
 
 Verdicts map to CI-friendly exit codes (`clean` / `suspect` / `hostile` → `0` / `1` / `2` under `--strict`). Every JSON finding carries a SkillTrustBench `taxonomy` tag (T01–T09) so results stay comparable across skill-security tooling. With `--check-deps`, pinned dependencies are checked against osv.dev; with `--llm-scan` (opt-in twice: flag plus environment variables), an OpenAI-compatible endpoint adds a second-pass review that the offline scanner never depends on.
 
@@ -125,8 +126,9 @@ Beyond static files, register the firewall as a Claude Code hook and hostile too
 ```
 
 Works with any harness that supports stdin JSON hooks (Claude Code, Codex, ...).
-The live hook fails closed on oversized input and on any `high` or `critical`
-finding. Medium-only `suspect` traffic is allowed with a warning to avoid turning
+The live hook scans the string values a tool will actually execute (not their
+JSON-escaped form), so tabs and quotes can't hide a command. It fails closed on
+oversized input and on any `high` or `critical` finding. Medium-only `suspect` traffic is allowed with a warning to avoid turning
 low-confidence signals into a noisy execution blocker.
 
 ## Install
@@ -181,6 +183,37 @@ Structural paths come from `config/default.toml`; add per-project overlays as `c
 `lockkeeper snapshot-runtimes` and `lockkeeper rebuild` write runtime inventory to a machine-local state dir (`~/.local/state/cap/`), never into your clone. The copies under `data/snapshots/` are read-only seeds used before the first snapshot run, so `git status` stays clean after normal use.
 
 The optional semantic sidecar (`embedder/`) adds embedding re-ranking on top of lexical scoring; everything works without it.
+
+### Keeping the index fresh
+
+You rarely need to run `rebuild` by hand. Every `route`/`search` stats the few hundred directories that contain capability folders (well under a millisecond for 26k skills) and compares a fingerprint of the harness settings that define capabilities: MCP servers, plugin enablement, the router's own config. Installing, removing, moving, or updating a skill, agent, command, or plugin version repairs the registry on the next query with a plain rebuild. Session state that harnesses rewrite on their own (a Claude Code project entry per folder you open, Codex project trust, model choices) is ignored. Real MCP/plugin changes re-capture harness snapshots under a 45-second budget; if a harness CLI is slow or broken, the query rebuilds from your config and the last snapshots, and prints a note on stderr. `lockkeeper doctor` shows whether the index is fresh. Editing the text of an existing `SKILL.md` is picked up by `lockkeeper check` and `rebuild`.
+
+### Decision providers (optional)
+
+A decision model can judge the top of the ranking, asking of each candidate "would this capability help with this task?", and Lockkeeper blends the answers into its own scores. It can be [Laya](https://pypi.org/project/laya/) (local), hosted Jev, or any `/v1/systemone` server, or a local cross-encoder reranker. Lockkeeper keeps deny rules, eligibility, required lanes, and the portfolio cap. The provider is off by default, and it starts in shadow mode, which reports its alternative bundle next to the normal route:
+
+```toml
+# config/local.toml
+[extensions.decision]
+provider = "systemone"
+endpoint = "http://127.0.0.1:8000/v1/systemone"   # laya-serve on this machine
+mode = "shadow"                                    # then "rerank" once measured
+```
+
+`scripts/eval_decision.py` compares a provider against the baseline on labeled tasks from your own history. See [decision/README.md](decision/README.md).
+
+### Resource corpora
+
+A large reference collection (thousands of statute sections, API pages, case-law batches) can route as one capability instead of thousands:
+
+```toml
+[[extensions.resource_corpora]]
+name = "german-law"
+root = "~/.agents/skills/german-law"
+description = "German statutes and case law: BGB, HGB, GmbHG, StGB, ZPO."
+```
+
+Shards leave global ranking and the semantic index. Their lexical matches lift the corpus, and a routed corpus lists its best shards as `resources`. The savings line reports them separately (`resource shards: loaded 5 of 21,087`), and `lockkeeper search --corpus german-law "Widerruf Fernabsatz"` searches inside one corpus.
 
 ## Development
 

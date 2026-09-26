@@ -27,16 +27,19 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from functools import lru_cache
 if sys.version_info < (3, 11):
     raise SystemExit("capability registry requires Python 3.11 or newer")
 import tomllib
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Union
 
 from router_config import RouterConfig, RouterConfigError, load_router_config, split_project_argument
+import decision_provider
 
 
 ROUTER_CONFIG: RouterConfig
@@ -56,7 +59,7 @@ SKILL_ROOTS: list[tuple[str, Path, str]]
 
 def configured_skill_roots(config: RouterConfig) -> list[tuple[str, Path, str]]:
     """Return the live skill roots, including the configured Hermes surface."""
-    return [
+    builtin = [
         ("shared", Path.home() / ".agents" / "skills", "skills-root"),
         ("codex", Path.home() / ".codex" / "skills", "skills-root"),
         ("claude", Path.home() / ".claude" / "skills", "skills-root"),
@@ -66,11 +69,19 @@ def configured_skill_roots(config: RouterConfig) -> list[tuple[str, Path, str]]:
         ("claude", Path.home() / ".claude" / "plugins" / "cache", "plugin-cache"),
         ("codex", Path.home() / ".codex" / "plugins" / "cache", "plugin-cache"),
         ("hermes", Path.home() / ".hermes" / "plugins", "plugin-cache"),
-        *(
-            (f"bound-{index}", root, "bound-skill-root")
-            for index, root in enumerate(EXTRA_SKILL_ROOTS)
-        ),
     ]
+    # `lockkeeper init` binds every detected skills directory, which includes the
+    # built-in ones above. Binding a built-in root again walked every skill twice
+    # on each rebuild and tagged it with a meaningless "bound-N" runtime.
+    known = {root.resolve(strict=False) for _, root, _ in builtin}
+    extra: list[tuple[str, Path, str]] = []
+    for index, root in enumerate(EXTRA_SKILL_ROOTS):
+        resolved = root.resolve(strict=False)
+        if resolved in known:
+            continue
+        known.add(resolved)
+        extra.append((f"bound-{index}", root, "bound-skill-root"))
+    return [*builtin, *extra]
 
 def _bootstrap_seed_snapshots(config) -> None:
     """Copy checked-in seed snapshots into the machine-local state dir once.
@@ -110,6 +121,69 @@ def _bootstrap_seed_snapshots(config) -> None:
 
 
 
+@dataclass(frozen=True)
+class ResourceCorpus:
+    """A large body of reference shards that routes as ONE capability.
+
+    Thousands of shard skills (statute sections, case-law batches, API pages)
+    used to compete one-by-one with real capabilities in global routing. A
+    corpus declares them as children: they leave the global ranking and the
+    semantic index, their lexical hits roll up into the parent, and a selected
+    parent carries its best-matching shards as `resources`.
+    """
+
+    id: str
+    name: str
+    root: Path
+    description: str
+    top_k: int
+
+
+RESOURCE_CORPORA: tuple[ResourceCorpus, ...] = ()
+RESOURCE_TOP_K = 5
+
+
+def parse_resource_corpora(raw: Any) -> tuple[ResourceCorpus, ...]:
+    if not isinstance(raw, list):
+        raise RouterConfigError("config extensions.resource_corpora must be an array of tables")
+    corpora: list[ResourceCorpus] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"config extensions.resource_corpora[{index}]"
+        if not isinstance(entry, dict):
+            raise RouterConfigError(f"{where} must be a table")
+        unknown = sorted(set(entry) - {"name", "root", "description", "top_k"})
+        if unknown:
+            raise RouterConfigError(f"{where} has unknown key(s): {', '.join(unknown)}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
+            raise RouterConfigError(f"{where}.name must be a lowercase slug (letters, digits, - or _)")
+        if name in seen:
+            raise RouterConfigError(f"{where}.name {name!r} is declared twice")
+        seen.add(name)
+        root = entry.get("root")
+        if not isinstance(root, str) or not root.strip():
+            raise RouterConfigError(f"{where}.root must be a directory path")
+        description = entry.get("description", "")
+        if not isinstance(description, str):
+            raise RouterConfigError(f"{where}.description must be a string")
+        top_k = entry.get("top_k", RESOURCE_TOP_K)
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or not 1 <= top_k <= 20:
+            raise RouterConfigError(f"{where}.top_k must be an integer from 1 to 20")
+        corpora.append(
+            ResourceCorpus(
+                id=f"corpus:{name}",
+                name=name,
+                root=Path(os.path.expanduser(root.strip())),
+                # Runs during import, before clean_text() is defined; records are
+                # cleaned again when the parent capability is built.
+                description=" ".join(description.split())[:600],
+                top_k=top_k,
+            )
+        )
+    return tuple(corpora)
+
+
 def configure_router(config: RouterConfig, *, verified_startup: bool = False) -> None:
     """Apply the resolved structural configuration to the legacy module globals."""
     global ROUTER_CONFIG, TOOL_SNAPSHOT, CLAUDE_MCP_SNAPSHOT, CODEX_MCP_SNAPSHOT
@@ -131,19 +205,24 @@ def configure_router(config: RouterConfig, *, verified_startup: bool = False) ->
     }
     HERMES_PROFILES = config.hermes_profiles
     global EXTRA_SKILL_ROOTS
+    # Extension errors are RouterConfigError, not bare RuntimeError: at import time
+    # only RouterConfigError falls back to built-in defaults. A typo here used to
+    # crash every command on import -- including `lockkeeper hook`, and a crashing
+    # hook is a non-blocking error to the harness, so one bad line in local.toml
+    # silently switched the live firewall off.
     configured_roots = config.get_extension("extra_skill_roots", [])
     if not isinstance(configured_roots, list) or not all(isinstance(x, str) for x in configured_roots):
-        raise RuntimeError("config extensions.extra_skill_roots must be a list of paths")
+        raise RouterConfigError("config extensions.extra_skill_roots must be a list of paths")
     EXTRA_SKILL_ROOTS = tuple(Path(os.path.expanduser(item)) for item in configured_roots)
     global LEGACY_MCP_NAMES
     configured_legacy = config.get_extension("legacy_mcp_names", [])
     if not isinstance(configured_legacy, list) or not all(isinstance(x, str) for x in configured_legacy):
-        raise RuntimeError("config extensions.legacy_mcp_names must be a list of strings")
+        raise RouterConfigError("config extensions.legacy_mcp_names must be a list of strings")
     LEGACY_MCP_NAMES = frozenset(name.lower() for name in configured_legacy)
     global HERMES_SHARED_SURFACE
     configured_surface = config.get_extension("hermes_shared_surface", [])
     if not isinstance(configured_surface, list) or not all(isinstance(x, str) for x in configured_surface):
-        raise RuntimeError(
+        raise RouterConfigError(
             "config extensions.hermes_shared_surface must be a list of 'kind:relative-path:scope' strings"
         )
     if configured_surface:
@@ -151,9 +230,13 @@ def configure_router(config: RouterConfig, *, verified_startup: bool = False) ->
         for entry in configured_surface:
             parts = entry.split(":")
             if len(parts) != 3 or parts[0] not in {"core", "managed-leaf"} or parts[2] not in {"project", "shared"}:
-                raise RuntimeError(f"invalid hermes_shared_surface entry: {entry!r}")
+                raise RouterConfigError(f"invalid hermes_shared_surface entry: {entry!r}")
             parsed_surface.append((parts[0], parts[1], parts[2]))
         HERMES_SHARED_SURFACE = tuple(parsed_surface)
+    else:
+        HERMES_SHARED_SURFACE = DEFAULT_HERMES_SHARED_SURFACE
+    global RESOURCE_CORPORA
+    RESOURCE_CORPORA = parse_resource_corpora(config.get_extension("resource_corpora", []))
     HERMES_SHARED_SURFACE_ROOT = config.hermes_shared_surface_root
     PROJECT_CATALOG = config.catalog_path
     _bootstrap_seed_snapshots(config)
@@ -221,10 +304,34 @@ def authoritative_config_paths() -> tuple[Path, ...]:
         Path.home() / ".claude" / "plugins" / "cache",
         Path.home() / ".codex" / "plugins" / "cache",
     ):
-        if root.is_dir():
-            paths.extend(root.rglob(".mcp.json"))
-            paths.extend(root.rglob("mcp.json"))
+        paths.extend(plugin_mcp_config_files(root))
     return tuple(dict.fromkeys(paths))
+
+
+def plugin_mcp_config_files(cache_root: Path) -> list[Path]:
+    """The plugin MCP configs discover_mcps() actually reads.
+
+    Discovery only consults .mcp.json / mcp.json at a plugin root (the directory
+    holding .claude-plugin/ or .codex-plugin/). The previous rglob hashed every
+    such file anywhere in the cache -- including vendored node_modules -- and
+    walked each plugin's whole source tree on every query.
+    """
+    found: list[Path] = []
+    if not cache_root.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(cache_root, followlinks=False):
+        current = Path(dirpath)
+        if any(
+            marker in dirnames and (current / marker / "plugin.json").is_file()
+            for marker in (".claude-plugin", ".codex-plugin")
+        ):
+            found.extend(current / name for name in (".mcp.json", "mcp.json") if name in filenames)
+            dirnames[:] = []  # a plugin root's source tree holds no further plugin roots
+            continue
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+    return sorted(found)
+
+
 PROJECT_CATALOG_START = "<!-- GENERATED-SKILL-CATALOG:START -->"
 PROJECT_CATALOG_END = "<!-- GENERATED-SKILL-CATALOG:END -->"
 MAX_SHARD_RECORDS = 1_000
@@ -242,6 +349,10 @@ AUTO_REFRESHABLE_STALENESS = (
     # corruption: rebuild rediscovers from disk and drops the row. Query verbs
     # must self-heal instead of bricking on an inventory the user can't see.
     "Registry references an untrusted ",
+    # A manifest written by an older router (different config-fingerprint
+    # shape, or no discovery watch) is repaired by one rebuild, never by a
+    # harness snapshot.
+    "Registry format is outdated:",
 )
 # Optional per-deployment pinning: map a capability name to the only SKILL.md
 # path that may satisfy an exact-name choice (guards against shadow copies).
@@ -951,14 +1062,36 @@ def symlink_points_directly(path: Path, target: Path) -> bool:
 
 
 def trusted_capability_roots() -> tuple[Path, ...]:
-    roots = [root for _, root, _ in SKILL_ROOTS]
-    roots.extend(root for _, root, _ in AGENT_ROOTS)
-    roots.extend(root for _, root in COMMAND_ROOTS)
-    roots.extend(root for _, root in PLUGIN_CACHE_ROOTS)
+    # Called once per record by every trust check. Resolving ~20 roots on each
+    # call made a 26k-record registry load issue ~8M lstat calls (~40s per
+    # route), so resolution is memoized on the inputs that define the roots.
+    return _resolved_trusted_roots(
+        tuple(SKILL_ROOTS),
+        tuple(AGENT_ROOTS),
+        tuple(COMMAND_ROOTS),
+        tuple(PLUGIN_CACHE_ROOTS),
+        ROUTER_CONFIG.hermes_project_source,
+        os.path.expanduser("~"),
+    )
+
+
+@lru_cache(maxsize=16)
+def _resolved_trusted_roots(
+    skill_roots: tuple[tuple[str, Path, str], ...],
+    agent_roots: tuple[tuple[str, Path, str], ...],
+    command_roots: tuple[tuple[str, Path], ...],
+    plugin_cache_roots: tuple[tuple[str, Path], ...],
+    hermes_project_source: Path,
+    home: str,
+) -> tuple[Path, ...]:
+    roots = [root for _, root, _ in skill_roots]
+    roots.extend(root for _, root, _ in agent_roots)
+    roots.extend(root for _, root in command_roots)
+    roots.extend(root for _, root in plugin_cache_roots)
     roots.extend(
         [
-            ROUTER_CONFIG.hermes_project_source / "capability-router",
-            Path.home() / ".codex" / ".tmp" / "bundled-marketplaces",
+            hermes_project_source / "capability-router",
+            Path(home) / ".codex" / ".tmp" / "bundled-marketplaces",
         ]
     )
     return tuple(root.resolve(strict=False) for root in roots)
@@ -1947,7 +2080,7 @@ def _resolve_cli(command: list[str]) -> list[str]:
     return [resolved or command[0], *command[1:]]
 
 
-def run_json_command(command: list[str], label: str, timeout: int = 120) -> Any:
+def run_json_command(command: list[str], label: str, timeout: float = 120) -> Any:
     command = _resolve_cli(command)
     try:
         result = subprocess.run(
@@ -2068,17 +2201,35 @@ def import_codex_tools(source: Optional[Path]) -> None:
     )
 
 
-def refresh_runtime_snapshots() -> None:
+def _deadline_timeout(default: float, deadline: Optional[float], label: str) -> float:
+    """Per-command timeout that also respects an overall snapshot deadline."""
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(label, 0)
+    return max(1.0, min(default, remaining))
+
+
+def refresh_runtime_snapshots(budget_seconds: Optional[float] = None) -> None:
+    """Re-capture harness MCP/plugin/tool inventories into the snapshot files.
+
+    budget_seconds bounds the total wall-clock time across every harness CLI
+    (the query self-heal path passes one); the explicit verb keeps the per-command
+    defaults. Snapshots are written only after every command succeeded, so a
+    timeout leaves the previous snapshot set intact.
+    """
     ensure_router_config_valid()
+    deadline = None if budget_seconds is None else time.monotonic() + budget_seconds
     try:
         claude = subprocess.run(
-            ["claude", "mcp", "list"],
+            _resolve_cli(["claude", "mcp", "list"]),
             cwd=ROUTER_CONFIG.cwd,
             text=True,
-        encoding="utf-8",
-        errors="replace",
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
-            timeout=120,
+            timeout=_deadline_timeout(120, deadline, "claude mcp list"),
             check=False,
         )
     except FileNotFoundError:
@@ -2094,7 +2245,11 @@ def refresh_runtime_snapshots() -> None:
         "servers": claude_servers,
     }
 
-    codex_data = run_json_command(["codex", "mcp", "list", "--json"], "codex mcp list", timeout=60) or []
+    codex_data = run_json_command(
+        ["codex", "mcp", "list", "--json"],
+        "codex mcp list",
+        timeout=_deadline_timeout(60, deadline, "codex mcp list"),
+    ) or []
     if not isinstance(codex_data, list):
         raise RuntimeError("codex mcp list returned unexpected JSON shape (expected a list)")
     codex_servers = [
@@ -2113,9 +2268,21 @@ def refresh_runtime_snapshots() -> None:
         "servers": codex_servers,
     }
 
-    claude_plugins = run_json_command(["claude", "plugin", "list", "--json"], "claude plugin list") or []
-    codex_plugin_data = run_json_command(["codex", "plugin", "list", "--json"], "codex plugin list", timeout=60) or {}
-    hermes_plugins = run_json_command(["hermes", "plugins", "list", "--json"], "hermes plugins list", timeout=60) or []
+    claude_plugins = run_json_command(
+        ["claude", "plugin", "list", "--json"],
+        "claude plugin list",
+        timeout=_deadline_timeout(120, deadline, "claude plugin list"),
+    ) or []
+    codex_plugin_data = run_json_command(
+        ["codex", "plugin", "list", "--json"],
+        "codex plugin list",
+        timeout=_deadline_timeout(60, deadline, "codex plugin list"),
+    ) or {}
+    hermes_plugins = run_json_command(
+        ["hermes", "plugins", "list", "--json"],
+        "hermes plugins list",
+        timeout=_deadline_timeout(60, deadline, "hermes plugins list"),
+    ) or []
     # Strict shapes: malformed harness output must fail loudly, never silently
     # drop data or crash with a raw AttributeError deep in iteration.
     if not isinstance(claude_plugins, list):
@@ -2202,10 +2369,10 @@ def refresh_runtime_snapshots() -> None:
                 command,
                 cwd=ROUTER_CONFIG.cwd,
                 text=True,
-        encoding="utf-8",
-        errors="replace",
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
-                timeout=60,
+                timeout=_deadline_timeout(60, deadline, "hermes tools list"),
                 check=False,
             )
         except FileNotFoundError:
@@ -2426,6 +2593,13 @@ def collect_registry(output: Path) -> tuple[list[dict[str, Any]], list[dict[str,
             *plugin_agent_regs,
             *plugin_command_regs,
         ]
+    corpus_records, corpus_regs = annotate_resource_corpora(records)
+    if corpus_records:
+        records = sorted(
+            [*records, *corpus_records],
+            key=lambda row: (row["category"], row["type"], row["name"].lower(), row["id"]),
+        )
+        registration_rows.extend(corpus_regs)
     registration_by_id = {row["registration_id"]: row for row in registration_rows}
     registrations = sorted(
         registration_by_id.values(),
@@ -2435,6 +2609,57 @@ def collect_registry(output: Path) -> tuple[list[dict[str, Any]], list[dict[str,
     for record in records:
         record["registration_count"] = registration_counts[record["id"]]
     return records, registrations, legacy
+
+
+def annotate_resource_corpora(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Mark configured corpus shards as children and return any synthetic parents.
+
+    Every capability body under a corpus root becomes a shard: `parent` names
+    the corpus capability and `rankable` is False, so it leaves global ranking
+    and the semantic index. A corpus that ships its own entry document at the
+    root (root/SKILL.md or a plugin README) keeps that record as the parent;
+    otherwise a synthetic `corpus` record is created. Returns (new parent
+    records, their registrations).
+    """
+    parents: list[dict[str, Any]] = []
+    registrations_out: list[dict[str, Any]] = []
+    for corpus in RESOURCE_CORPORA:
+        root = corpus.root.resolve(strict=False)
+        prefix = str(root) + os.sep
+        members = [
+            record
+            for record in records
+            if record["type"] in SOURCE_TRUST_TYPES
+            and record["source_path"].startswith(prefix)
+            and "parent" not in record
+        ]
+        entry_docs = [record for record in members if Path(record["source_path"]).parent == root]
+        shards = [record for record in members if record not in entry_docs]
+        if not shards:
+            continue
+        if len(entry_docs) == 1:
+            parent = entry_docs[0]
+            if corpus.description and not parent["description"]:
+                parent["description"] = clean_text(corpus.description, 600)
+        else:
+            description = corpus.description or (
+                f"Reference corpus {corpus.name}: {len(shards):,} entries, searched by topic."
+            )
+            parent = capability_record(
+                corpus.id, "corpus", corpus.name, description, str(root), "active", ["shared"], 1
+            )
+            parents.append(parent)
+            registrations_out.append(
+                registration(corpus.id, "corpus", "shared", "resource-corpus", str(root), str(root), "active")
+            )
+        parent["resource_count"] = len(shards)
+        parent["resource_top_k"] = corpus.top_k
+        for shard in shards:
+            shard["parent"] = parent["id"]
+            shard["rankable"] = False
+    return parents, registrations_out
 
 
 def render_category_rows(records: list[dict[str, Any]]) -> str:
@@ -2648,42 +2873,102 @@ CLAUDE_JSON_PROJECT_KEYS = (
     "enabledMcpjsonServers",
     "disabledMcpjsonServers",
 )
+# ~/.claude/settings.json also carries model, permissions, hooks, status line and
+# UI state that Claude Code and users rewrite freely. Discovery reads only these.
+CLAUDE_SETTINGS_CAPABILITY_KEYS = (
+    "enabledPlugins",
+    "deniedMcpServers",
+    "allowedMcpServers",
+    "enabledMcpjsonServers",
+    "disabledMcpjsonServers",
+    "enableAllProjectMcpServers",
+)
+# ~/.codex/config.toml gains a [projects."<path>"] trust entry for every new
+# directory Codex opens, and /model rewrites model settings. Discovery and
+# `codex mcp list` depend only on these tables.
+CODEX_CONFIG_CAPABILITY_KEYS = ("mcp_servers", "plugins")
+# Bump whenever the input fingerprint changes shape, so an upgraded router
+# repairs old manifests with a plain rebuild instead of a harness snapshot.
+INPUT_FINGERPRINT_VERSION = 2
+
+
+def _has_value(value: Any) -> bool:
+    return value not in (None, "", [], {})
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
+
+
+def _claude_json_relevant(data: dict[str, Any]) -> dict[str, Any]:
+    relevant: dict[str, Any] = {
+        key: data[key] for key in CLAUDE_JSON_CAPABILITY_KEYS if _has_value(data.get(key))
+    }
+    projects = data.get("projects")
+    if isinstance(projects, dict):
+        # Claude Code adds a project entry (with empty mcpServers and
+        # enabledMcpjsonServers) for every directory it is opened in. Discovery
+        # never reads other projects, and `claude mcp list` runs from the
+        # router's cwd, so only that project's non-empty capability keys count.
+        cwd = ROUTER_CONFIG.cwd
+        wanted = {str(cwd), str(cwd.resolve(strict=False)), cwd.as_posix()}
+        scoped = {}
+        for project, config in projects.items():
+            if project not in wanted or not isinstance(config, dict):
+                continue
+            entry = {key: config[key] for key in CLAUDE_JSON_PROJECT_KEYS if _has_value(config.get(key))}
+            if entry:
+                scoped[project] = entry
+        if scoped:
+            relevant["projects"] = scoped
+    return relevant
+
+
+def _keys_relevant(keys: tuple[str, ...]):
+    def narrow(data: dict[str, Any]) -> dict[str, Any]:
+        return {key: data[key] for key in keys if _has_value(data.get(key))}
+
+    return narrow
 
 
 def capability_relevant_bytes(path: Path) -> bytes:
     """Bytes that define this config's capability surface.
 
-    Only the configured Claude settings path needs narrowing today; every other
-    authoritative config is capability configuration end to end, so its raw bytes
-    are the right key. Any parse failure falls back to raw bytes, keeping the
-    guard fail-closed.
+    Harness configs mix capability settings with state the harness rewrites on
+    its own (session counters, project trust, model choice). Hashing whole files
+    made the registry look stale whenever the user opened a new project, so the
+    files discovery parses are narrowed to the keys it reads. Every other
+    authoritative config is capability configuration end to end and keeps its raw
+    bytes. Any parse failure falls back to raw bytes, keeping the guard
+    fail-closed.
     """
     raw = path.read_bytes()
-    if path.expanduser().resolve(strict=False) != ROUTER_CONFIG.claude_json_path.resolve(strict=False):
+    resolved = path.expanduser().resolve(strict=False)
+    home = Path.home()
+    narrowers = {
+        ROUTER_CONFIG.claude_json_path.resolve(strict=False): ("json", _claude_json_relevant),
+        (home / ".claude" / "settings.json").resolve(strict=False): (
+            "json",
+            _keys_relevant(CLAUDE_SETTINGS_CAPABILITY_KEYS),
+        ),
+        (home / ".codex" / "config.toml").resolve(strict=False): (
+            "toml",
+            _keys_relevant(CODEX_CONFIG_CAPABILITY_KEYS),
+        ),
+    }
+    selected = narrowers.get(resolved)
+    if selected is None:
         return raw
+    kind, narrow = selected
     try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        data = tomllib.loads(raw.decode("utf-8")) if kind == "toml" else json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return raw
     if not isinstance(data, dict):
         return raw
-    relevant: dict[str, Any] = {
-        key: data[key] for key in CLAUDE_JSON_CAPABILITY_KEYS if key in data
-    }
-    projects = data.get("projects")
-    if isinstance(projects, dict):
-        scoped = {}
-        for project, config in projects.items():
-            if not isinstance(config, dict):
-                continue
-            entry = {key: config[key] for key in CLAUDE_JSON_PROJECT_KEYS if key in config}
-            if entry:
-                scoped[project] = entry
-        if scoped:
-            relevant["projects"] = scoped
-    return json.dumps(relevant, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    return _canonical_json_bytes(narrow(data))
 
 
 def _deterministic_config_dir() -> Path:
@@ -2700,7 +2985,7 @@ def _deterministic_config_dir() -> Path:
 
 
 def authoritative_input_fingerprint() -> str:
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(f"input-fingerprint-v{INPUT_FINGERPRINT_VERSION}\0".encode("ascii"))
     for path in sorted(authoritative_config_paths(), key=lambda item: str(item)):
         digest.update(str(path).encode("utf-8", errors="replace"))
         digest.update(b"\0")
@@ -2709,6 +2994,116 @@ def authoritative_input_fingerprint() -> str:
         except OSError:
             digest.update(b"<missing>")
         digest.update(b"\0")
+    return digest.hexdigest()[:20]
+
+
+DISCOVERY_WATCH_VERSION = 1
+# Recorded for a watched directory that changed while the rebuild was walking it,
+# so the next query sees a mismatch and rediscovers instead of trusting a scan
+# that may have missed the change.
+CHANGED_DURING_REBUILD = "changed-during-rebuild"
+# Registration types whose entry_path is a local file found by walking a watched
+# root, mapped to how many levels up the containing directory sits (a skill's
+# SKILL.md -> the folder holding skill folders; an agent file -> its folder).
+# Archived legacy links are covered by watching the archive file itself.
+WATCHED_ENTRY_TYPES = {"skill": 2, "entrypoint": 2, "agent": 1, "command": 1}
+
+
+def discovery_roots() -> list[Path]:
+    roots = [root for _, root, _ in SKILL_ROOTS]
+    roots.extend(root for _, root, _ in AGENT_ROOTS)
+    roots.extend(root for _, root in COMMAND_ROOTS)
+    roots.extend(root for _, root in PLUGIN_CACHE_ROOTS)
+    return list(dict.fromkeys(roots))
+
+
+def discovery_watch_paths(registrations: Iterable[dict[str, Any]], output: Path) -> list[str]:
+    """Directories whose mtime changes whenever a discoverable capability appears or goes.
+
+    Creating, deleting, or renaming an entry changes its parent directory's
+    mtime, so watching every root plus every directory that CONTAINS a skill,
+    agent, command, or plugin folder detects installs, removals, moves, and
+    plugin version updates with a few hundred stat calls -- instead of the
+    ~1.6s (6.6k skills) to ~40s (26k) full walk that the query path had to skip.
+    The skill directories themselves are deliberately not watched: that would
+    cost one stat per skill, and their contents change for unrelated reasons.
+    Editing an existing SKILL.md is therefore picked up by `check`/`rebuild`,
+    not by the per-query guard.
+    """
+    roots = discovery_roots()
+    watched: set[str] = {str(root) for root in roots}
+    watched.add(str(output / "legacy" / "auto-discovery-symlinks.json"))
+    root_texts = sorted((str(root) for root in roots), key=len, reverse=True)
+    for row in registrations:
+        entry_text = row.get("entry_path") or ""
+        depth = WATCHED_ENTRY_TYPES.get(row.get("type", ""))
+        if row.get("source_kind") == "plugin-manifest":
+            depth = 3  # <plugin>/<version>/.claude-plugin/plugin.json -> <plugin>
+        if depth is None or not entry_text or row.get("source_kind") == "archived-source":
+            continue
+        root_text = next(
+            (text for text in root_texts if entry_text == text or entry_text.startswith(text + os.sep)),
+            None,
+        )
+        if root_text is None:
+            continue
+        container = Path(entry_text)
+        for _ in range(depth):
+            container = container.parent
+        container_text = str(container)
+        while len(container_text) > len(root_text) and container_text.startswith(root_text + os.sep):
+            watched.add(container_text)
+            container = container.parent
+            container_text = str(container)
+    return sorted(watched)
+
+
+# File timestamps come from a coarse kernel clock that can trail time.time_ns()
+# by a scheduler tick, so "modified after the rebuild started" needs slack.
+DISCOVERY_CLOCK_SLACK_NS = 20_000_000
+
+
+def watched_mtimes(paths: Iterable[str]) -> dict[str, int]:
+    mtimes: dict[str, int] = {}
+    for text in paths:
+        try:
+            mtimes[text] = os.stat(text).st_mtime_ns
+        except OSError:
+            continue
+    return mtimes
+
+
+def discovery_signature(
+    paths: Iterable[str],
+    rebuild_window: Optional[tuple[int, int]] = None,
+    before: Optional[dict[str, int]] = None,
+) -> str:
+    """Digest of the watched paths' mtimes.
+
+    During a rebuild, a directory that changed while discovery was walking is
+    recorded as CHANGED_DURING_REBUILD, which forces one more rediscovery on the
+    next query instead of trusting a walk that may have missed the change. Two
+    signals: for a directory stat'ed just before the walk (`before`), its mtime
+    moved -- exact, no clock involved; for a directory new to the watch list,
+    its mtime falls inside `rebuild_window`. Only the window counts, never
+    "newer than start": a FUTURE mtime (an archive made on a machine with a
+    fast clock) must not be flagged on every rebuild, or every query would
+    rebuild forever.
+    """
+    digest = hashlib.sha256(f"discovery-watch-v{DISCOVERY_WATCH_VERSION}\0".encode("ascii"))
+    for text in paths:
+        try:
+            mtime = os.stat(text).st_mtime_ns
+            if before is not None and text in before:
+                # Stat'ed just before the walk: exact, no clock involved.
+                moved, in_window = before[text] != mtime, False
+            else:
+                moved = False
+                in_window = rebuild_window is not None and rebuild_window[0] <= mtime <= rebuild_window[1]
+            state = CHANGED_DURING_REBUILD if moved or in_window else str(mtime)
+        except OSError:
+            state = "missing"
+        digest.update(f"{text}\0{state}\n".encode("utf-8", errors="replace"))
     return digest.hexdigest()[:20]
 
 
@@ -2721,6 +3116,7 @@ def build_manifest(records: list[dict[str, Any]], registrations: list[dict[str, 
         "generated_at": utc_now(),
         "fingerprint": registry_fingerprint(records),
         "input_fingerprint": authoritative_input_fingerprint(),
+        "input_fingerprint_version": INPUT_FINGERPRINT_VERSION,
         "counts": {
             "capabilities": len(records),
             "registrations": len(registrations),
@@ -2739,11 +3135,82 @@ def build_manifest(records: list[dict[str, Any]], registrations: list[dict[str, 
     }
 
 
+_HELD_REGISTRY_LOCKS: dict[str, int] = {}
+
+
+def acquire_registry_lock(output: Path):
+    """Take the per-output write lock and return its release callable.
+
+    Rebuilds, query self-heal, and reindex all rewrite the same artifact set.
+    Before this lock covered `rebuild`, a manual rebuild racing a query left the
+    query reading a new registry.jsonl beside an old manifest, which it read as
+    staleness and "repaired" with a second, concurrent rebuild. Re-entrant within
+    a process so the self-heal path can call rebuild() while holding it. Raises
+    OSError when the output directory cannot be written (sandboxes, read-only
+    mounts); callers decide whether that is fatal.
+    """
+    key = str(output.resolve(strict=False))
+    if _HELD_REGISTRY_LOCKS.get(key):
+        _HELD_REGISTRY_LOCKS[key] += 1
+
+        def release_nested() -> None:
+            _HELD_REGISTRY_LOCKS[key] -= 1
+
+        return release_nested
+    output.mkdir(parents=True, exist_ok=True)
+    handle = open_lock_file(output / AUTO_REFRESH_LOCK_NAME)
+    try:
+        _lock_exclusive(handle)
+    except BaseException:
+        handle.close()
+        raise
+    _HELD_REGISTRY_LOCKS[key] = 1
+
+    def release() -> None:
+        _HELD_REGISTRY_LOCKS.pop(key, None)
+        handle.close()  # closing the descriptor drops the flock/msvcrt lock
+
+    return release
+
+
+@contextlib.contextmanager
+def registry_write_lock(output: Path):
+    release = acquire_registry_lock(output)
+    try:
+        yield
+    finally:
+        release()
+
+
 def rebuild(output: Path, quiet: bool = False) -> dict[str, Any]:
     ensure_router_config_valid()
     output.mkdir(parents=True, exist_ok=True)
+    with registry_write_lock(output):
+        return _rebuild_locked(output, quiet)
+
+
+def _rebuild_locked(output: Path, quiet: bool) -> dict[str, Any]:
+    previous_watch = load_json(output / "manifest.json").get("discovery_watch")
+    previous_paths = previous_watch.get("paths") if isinstance(previous_watch, dict) else None
+    before = watched_mtimes(
+        [
+            *(item for item in (previous_paths if isinstance(previous_paths, list) else []) if isinstance(item, str)),
+            *(str(root) for root in discovery_roots()),
+        ]
+    )
+    started_ns = time.time_ns()
     records, registrations, legacy = collect_registry(output)
     manifest = build_manifest(records, registrations)
+    watch_paths = discovery_watch_paths(registrations, output)
+    manifest["discovery_watch"] = {
+        "version": DISCOVERY_WATCH_VERSION,
+        "paths": watch_paths,
+        "signature": discovery_signature(
+            watch_paths,
+            rebuild_window=(started_ns - DISCOVERY_CLOCK_SLACK_NS, time.time_ns()),
+            before=before,
+        ),
+    }
     files_by_category = render_category_files(output, records)
     manifest["category_files"] = files_by_category
     manifest["legacy_mcp_registrations"] = legacy
@@ -2761,7 +3228,46 @@ def rebuild(output: Path, quiet: bool = False) -> dict[str, Any]:
     return manifest
 
 
-def load_registry(output: Path) -> list[dict[str, Any]]:
+SOURCE_TRUST_TYPES = frozenset({"skill", "agent", "command", "entrypoint"})
+KNOWN_CAPABILITY_TYPES = {
+    "skill", "plugin", "mcp", "tool", "toolset", "agent", "command", "entrypoint", "corpus",
+}
+# Types that can fill the primary lane: bodies an agent reads, and corpora whose
+# best shards it reads.
+PRIMARY_TYPES = {"skill", "entrypoint", "agent", "command", "corpus"}
+
+
+def record_source_is_trusted(record: dict[str, Any]) -> bool:
+    """Whether a record's readable body still lives under a trusted root.
+
+    load_path values are handed to agents as files to read and follow, so a
+    tampered or outdated registry row must never point one at an arbitrary
+    file. load_registry() checks every row by default; query verbs defer the
+    check to the rows they actually emit, which costs a handful of path
+    resolutions instead of one per registry record.
+    """
+    if record.get("type") not in SOURCE_TRUST_TYPES:
+        return True
+    source_path = record.get("source_path") or ""
+    if not source_path:
+        return False
+    return capability_path_is_trusted(Path(source_path).expanduser(), record["type"])
+
+
+def _warn_untrusted_source(record: dict[str, Any]) -> None:
+    _warn_once(
+        f"skipped {record.get('type')}:{record.get('name')} because its registry source is outside "
+        "the trusted capability roots; run `lockkeeper rebuild` to rediscover it"
+    )
+
+
+def load_registry(output: Path, *, verify_sources: bool = True) -> list[dict[str, Any]]:
+    """Load and validate registry.jsonl.
+
+    verify_sources=False skips the per-row trusted-root check (one path
+    resolution per row). Only callers that re-check each emitted row with
+    record_source_is_trusted() may pass it.
+    """
     ensure_router_config_valid()
     path = output / "registry.jsonl"
     if not path.is_file():
@@ -2795,7 +3301,7 @@ def load_registry(output: Path) -> list[dict[str, Any]]:
             raise RuntimeError(
                 f"Invalid registry record at line {line_number}: fields {', '.join(invalid_fields)}"
             )
-        if row["type"] not in {"skill", "plugin", "entrypoint", "mcp", "tool", "toolset", "agent", "command"}:
+        if row["type"] not in KNOWN_CAPABILITY_TYPES:
             raise RuntimeError(f"Invalid registry capability type at line {line_number}: {row['type']}")
         if row["category"] not in CATEGORY_BY_SLUG:
             raise RuntimeError(f"Invalid registry category at line {line_number}: {row['category']}")
@@ -2803,15 +3309,12 @@ def load_registry(output: Path) -> list[dict[str, Any]]:
             raise RuntimeError(f"Invalid registry identity/count at line {line_number}")
         if not row["runtimes"] or not all(isinstance(runtime, str) and runtime for runtime in row["runtimes"]):
             raise RuntimeError(f"Invalid registry runtimes at line {line_number}")
-        if (
-            row["type"] in {"skill", "agent", "command", "entrypoint"}
-            and (
-                not row["source_path"]
-                # Validate against the record's OWN type: the historical
-                # hardcoded "skill" rejected every .md agent/command/
-                # entrypoint source and bricked all read verbs.
-                or not capability_path_is_trusted(Path(row["source_path"]).expanduser(), row["type"])
-            )
+        if row["type"] in SOURCE_TRUST_TYPES and (
+            not row["source_path"]
+            # Validate against the record's OWN type: the historical
+            # hardcoded "skill" rejected every .md agent/command/
+            # entrypoint source and bricked all read verbs.
+            or (verify_sources and not record_source_is_trusted(row))
         ):
             raise RuntimeError(
                 f"Registry references an untrusted {row['type']} source at registry line {line_number}; run rebuild"
@@ -2853,18 +3356,19 @@ def load_registrations(output: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def assert_registry_fresh(output: Path, deep: bool = True) -> None:
-    """Refuse to serve against a stale registry.
+def assert_registry_fresh(output: Path, deep: bool = True) -> list[dict[str, Any]]:
+    """Refuse to serve against a stale registry; return the loaded records when fresh.
 
-    The cheap checks below (snapshot mtimes, registry fingerprint, and the config
-    input-fingerprint) run always -- the input-fingerprint is what catches an added/removed
-    MCP or plugin, which is every staleness we have actually hit. The DEEP check re-walks the
-    whole skill tree (~6.6k files, ~1.6s) to detect raw SKILL.md files added or removed on
-    disk since the last rebuild. That cost is intolerable on the per-QUERY path -- it dominated
-    search latency -- and its payoff is small: an unindexed skill is simply not routable until
-    rebuild, exactly as today, so a slightly-stale skill set degrades gracefully rather than
-    misroutes. So search/bundle pass deep=False; `check` and `rebuild` still do the full walk
-    (run_check has its own independent copy), keeping the skill set eventually-consistent.
+    The cheap checks (snapshot mtimes, registry fingerprint, the capability-scoped
+    config fingerprint, and the discovery watch) run always. The discovery watch
+    stats the few hundred directories that contain capability folders, which is
+    how the per-query path now notices installed, removed, moved, and updated
+    skills, agents, commands, and plugins without walking the tree.
+
+    The DEEP check re-walks every skill root (~1.6s at 6.6k skills, tens of
+    seconds at 26k) and verifies every registry row's source against the trusted
+    roots. `check` and explicit callers keep it; search/bundle pass deep=False
+    and re-check the rows they emit instead (record_source_is_trusted).
     """
     ensure_router_config_valid()
     validate_required_snapshots()
@@ -2881,19 +3385,38 @@ def assert_registry_fresh(output: Path, deep: bool = True) -> None:
         output / "manifest.json",
         {"fingerprint": str, "input_fingerprint": str, "counts": dict},
     )
-    records = load_registry(output)
+    records = load_registry(output, verify_sources=deep)
     actual_fingerprint = registry_fingerprint(records)
     if manifest["fingerprint"] != actual_fingerprint:
         raise RuntimeError(
             f"Registry fingerprint {actual_fingerprint} does not match manifest {manifest['fingerprint']}; run rebuild"
+        )
+    if manifest.get("input_fingerprint_version") != INPUT_FINGERPRINT_VERSION:
+        raise RuntimeError(
+            "Registry format is outdated: the manifest predates the current config fingerprint; run rebuild"
         )
     current_input_fingerprint = authoritative_input_fingerprint()
     if manifest["input_fingerprint"] != current_input_fingerprint:
         raise RuntimeError(
             "Runtime configuration changed after the registry was built; run snapshot-runtimes, then rebuild"
         )
+    watch = manifest.get("discovery_watch")
+    if (
+        not isinstance(watch, dict)
+        or watch.get("version") != DISCOVERY_WATCH_VERSION
+        or not isinstance(watch.get("paths"), list)
+        or not all(isinstance(item, str) for item in watch["paths"])
+        or not isinstance(watch.get("signature"), str)
+    ):
+        raise RuntimeError(
+            "Registry skill discovery is stale: the manifest predates discovery tracking; run rebuild"
+        )
+    if discovery_signature(watch["paths"]) != watch["signature"]:
+        raise RuntimeError(
+            "Registry skill discovery is stale: a capability directory changed on disk; run rebuild"
+        )
     if not deep:
-        return  # per-query fast path: skip the ~1.6s skill-tree walk (see docstring)
+        return records
     registrations = load_registrations(output)
     catalog_skill_entries = {
         (row["runtime"], row["source_kind"], row["entry_path"])
@@ -2909,6 +3432,7 @@ def assert_registry_fresh(output: Path, deep: bool = True) -> None:
             f"missing={len(current_skill_entries - catalog_skill_entries)} "
             f"stale={len(catalog_skill_entries - current_skill_entries)}; run rebuild"
         )
+    return records
 
 
 def auto_refreshable_staleness(error: RuntimeError) -> bool:
@@ -2916,20 +3440,37 @@ def auto_refreshable_staleness(error: RuntimeError) -> bool:
     return str(error).startswith(AUTO_REFRESHABLE_STALENESS)
 
 
-def ensure_query_registry_fresh(output: Path) -> None:
+# Only these stale states can have been caused by runtime state that a rebuild
+# cannot see on its own, so only they pay for re-running the harness CLIs.
+# Everything else (skills added on disk, snapshots newer than the registry, a
+# torn or outdated manifest, a moved source) is repaired by a plain rebuild.
+SNAPSHOT_REFRESH_STALENESS = (
+    "Registry missing at ",
+    "Runtime configuration changed after the registry was built",
+)
+# Total wall-clock budget for re-capturing harness snapshots on the query path.
+# `claude mcp list` health-checks every configured server and can take minutes;
+# past this budget the query rebuilds from the last snapshots and says so.
+SNAPSHOT_AUTOHEAL_BUDGET_SECONDS = 45
+
+
+def ensure_query_registry_fresh(output: Path) -> Optional[list[dict[str, Any]]]:
     """Self-heal a stale canonical registry once, while keeping query output stable.
+
+    Returns the freshly validated records (so the caller does not parse the
+    registry a second time), or None when it had to serve an existing index it
+    could not refresh.
 
     Search and bundle must never serve an inventory whose runtime fingerprint has
     changed. They may, however, recover the documented lifecycle themselves.
-    The lock serializes concurrent callers; once acquired, the second caller
-    rechecks freshness before doing any work. Only known stale states qualify,
-    so a malformed configuration, corrupt registry, or failed harness command
+    The lock serializes concurrent callers (and explicit rebuilds); once
+    acquired, the second caller rechecks freshness before doing any work. Only
+    known stale states qualify, so a malformed configuration or corrupt registry
     remains a visible error rather than being hidden behind repeated rebuilds.
     """
     initial_staleness: RuntimeError | None = None
     try:
-        assert_registry_fresh(output, deep=False)
-        return
+        return assert_registry_fresh(output, deep=False)
     except RuntimeError as initial_error:
         if not auto_refreshable_staleness(initial_error):
             raise
@@ -2941,10 +3482,8 @@ def ensure_query_registry_fresh(output: Path) -> None:
             "run the lifecycle explicitly for this --output value"
         ) from initial_staleness
 
-    lock_path = output / AUTO_REFRESH_LOCK_NAME
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_handle = open_lock_file(lock_path)
+        release = acquire_registry_lock(output)
     except OSError as lock_error:
         # A sandboxed or read-only deployment cannot take the shared lock:
         # macOS seatbelt denials surface as EPERM, plain read-only mounts as
@@ -2965,22 +3504,33 @@ def ensure_query_registry_fresh(output: Path) -> None:
             "capabilities added since the last rebuild are missing. "
             "Run `lockkeeper rebuild` from an unsandboxed session to refresh"
         )
-        return
-    with lock_handle as lock:
-        _lock_exclusive(lock)
+        return None
+    try:
         try:
-            assert_registry_fresh(output, deep=False)
-            return
+            return assert_registry_fresh(output, deep=False)
         except RuntimeError as locked_error:
             if not auto_refreshable_staleness(locked_error):
                 raise
+            staleness = locked_error
 
         try:
             # Lifecycle helpers normally report to stdout. Routing must keep
             # its established human and JSON output contracts, so recovery is
-            # deliberately silent unless it fails.
+            # deliberately silent unless it fails or degrades.
             with contextlib.redirect_stdout(io.StringIO()):
-                refresh_runtime_snapshots()
+                if str(staleness).startswith(SNAPSHOT_REFRESH_STALENESS):
+                    try:
+                        refresh_runtime_snapshots(budget_seconds=SNAPSHOT_AUTOHEAL_BUDGET_SECONDS)
+                    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as snapshot_error:
+                        # Config-sourced records (MCP servers, plugin enablement)
+                        # are read straight from the config files by rebuild, so
+                        # a slow or broken harness CLI must not take routing down.
+                        _warn_once(
+                            "runtime snapshots could not be refreshed automatically "
+                            f"({redact_sensitive_text(snapshot_error, 200)}); rebuilt the registry from the "
+                            "current config and the last captured snapshots. Run `lockkeeper snapshot-runtimes` "
+                            "to refresh MCP and plugin status"
+                        )
                 rebuild(output, quiet=True)
                 # The rebuild moved the fingerprint, which invalidates every
                 # vector. Re-embedding is incremental (the sidecar reuses cached
@@ -2993,17 +3543,34 @@ def ensure_query_registry_fresh(output: Path) -> None:
                 semantic_restored = reindex_semantic(
                     output, quiet=True, timeout=SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS
                 )
-            assert_registry_fresh(output, deep=False)
-            if not semantic_restored:
+            try:
+                records = assert_registry_fresh(output, deep=False)
+            except RuntimeError as recheck_error:
+                if not str(recheck_error).startswith("Registry skill discovery is stale:"):
+                    raise
+                # Capabilities changed on disk while this rebuild ran (an install
+                # in progress). The index just built is the best available; the
+                # next query rediscovers again instead of this one failing.
+                _warn_once(
+                    "capability folders changed while the registry was being refreshed; "
+                    "serving the refreshed index, the next route will pick up the rest"
+                )
+                records = load_registry(output, verify_sources=False)
+            # Only a sidecar that is actually installed can have been degraded;
+            # a lexical-only deployment has nothing to restore.
+            if not semantic_restored and semantic_interpreter(output).is_file():
                 _warn_once(
                     "registry was refreshed automatically but the semantic index could not be "
                     "rebuilt; ranking is lexical-only until `lockkeeper reindex` runs"
                 )
+            return records
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as refresh_error:
             raise RuntimeError(
                 "Automatic registry refresh failed: "
                 f"{redact_sensitive_text(refresh_error)}; inspect the named source and retry"
             ) from refresh_error
+    finally:
+        release()
 
 
 def query_terms(query: str) -> list[tuple[str, float]]:
@@ -3063,11 +3630,11 @@ def record_is_eligible(record: dict[str, Any], runtime: str) -> bool:
 def record_is_rankable(record: dict[str, Any]) -> bool:
     """Free-text *ranking* visibility only. This is NOT an eligibility check.
 
-    Hook for per-deployment ranking policy: return False to keep a record
-    exact-name resolvable via choose()/exact_record() while hiding it from
-    ranked free-text search. All records are rankable by default.
+    Records marked `"rankable": false` (resource-corpus shards, or rows a
+    deployment hides) stay exact-name resolvable via choose()/exact_record()
+    but never compete in ranked free-text search. Everything else is rankable.
     """
-    return True
+    return record.get("rankable", True) is not False
 
 
 def search_score(
@@ -3159,6 +3726,7 @@ def search_score(
     if record["status"] in {"cached", "dangling", "plugin-cached"}:
         score -= 8
     type_hints = {
+        "corpus": "corpus",
         "skill": "skill",
         "mcp": "mcp",
         "plugin": "plugin",
@@ -3332,6 +3900,11 @@ def semantic_sidecar_script(output: Path, synchronize: bool = False) -> Path:
         return source
 
 
+def semantic_interpreter(output: Path) -> Path:
+    """The semantic sidecar's pinned venv interpreter (may not exist)."""
+    return output / "embedder" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
 def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = None) -> bool:
     """Re-embed the corpus against the CURRENT manifest fingerprint. Returns True on success.
 
@@ -3351,7 +3924,7 @@ def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = 
     say so and carry on. A missing index is lexical-only, which is a working router.
     """
     ensure_router_config_valid()
-    interpreter = output / "embedder" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    interpreter = semantic_interpreter(output)
     script = semantic_sidecar_script(output, synchronize=True)
     registry = output / "registry.jsonl"
     if not interpreter.is_file() or not script.is_file() or not registry.is_file():
@@ -3389,6 +3962,19 @@ def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = 
     return True
 
 
+_SEMANTIC_CACHE: dict[tuple[str, str, str, str], dict[str, float]] = {}
+
+
+def _semantic_hit_map(payload: Any) -> dict[str, float]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(hit["id"]): float(hit["cos"])
+        for hit in payload.get("hits", [])
+        if isinstance(hit, dict) and "id" in hit and "cos" in hit
+    }
+
+
 def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "") -> dict[str, float]:
     """capability_id -> cosine, for the top-K semantically nearest capabilities.
 
@@ -3397,8 +3983,41 @@ def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "")
     it did before embeddings existed. This is the ONLY fail-open component in the system;
     the registry staleness guard stays fail-closed. Never raises.
     """
-    if not query.strip():
-        return {}
+    return semantic_hits_many(output, [query], fingerprint, runtime).get(query, {})
+
+
+def semantic_hits_many(
+    output: Path, queries: Iterable[str], fingerprint: str, runtime: str = ""
+) -> dict[str, dict[str, float]]:
+    """semantic_hits() for several queries with ONE sidecar process.
+
+    Every sidecar call cold-starts the embedding model, and a multi-intent route
+    used to pay that once for the task and again for each intent (up to four
+    model loads per route). Results, including failures, are memoized for the
+    process, so each distinct query is embedded at most once.
+    """
+    wanted = list(dict.fromkeys(query for query in queries if query.strip()))
+    results: dict[str, dict[str, float]] = {}
+    pending: list[str] = []
+    for query in wanted:
+        cached = _SEMANTIC_CACHE.get((str(output), fingerprint, runtime, query))
+        if cached is None:
+            pending.append(query)
+        else:
+            results[query] = cached
+    if not pending:
+        return results
+    fetched = _semantic_query_sidecar(output, pending, fingerprint, runtime)
+    for query in pending:
+        hits = fetched.get(query, {})
+        _SEMANTIC_CACHE[(str(output), fingerprint, runtime, query)] = hits
+        results[query] = hits
+    return results
+
+
+def _semantic_query_sidecar(
+    output: Path, queries: list[str], fingerprint: str, runtime: str
+) -> dict[str, dict[str, float]]:
     # Refresh code before inspecting index freshness. A stale index must degrade,
     # but it must not leave a known-stale executable copy in place as a side effect.
     script = semantic_sidecar_script(output, synchronize=True)
@@ -3416,20 +4035,23 @@ def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "")
             "Run `lockkeeper reindex` to restore semantic re-ranking"
         )
         return {}
-    interpreter = output / "embedder" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    interpreter = semantic_interpreter(output)
     if not interpreter.is_file() or not script.is_file():
         return {}
+    command = [
+        str(interpreter), str(script), "query", "--index", str(output),
+        "--topk", str(SEMANTIC_TOPK),
+    ]
+    registry = output / "registry.jsonl"
+    if runtime and registry.is_file():
+        command.extend(["--registry", str(registry), "--runtime", runtime])
+    batched = len(queries) > 1
+    if batched:
+        command.append("--batch")
     try:
-        command = [
-            str(interpreter), str(script), "query", "--index", str(output),
-            "--topk", str(SEMANTIC_TOPK),
-        ]
-        registry = output / "registry.jsonl"
-        if runtime and registry.is_file():
-            command.extend(["--registry", str(registry), "--runtime", runtime])
         proc = subprocess.run(
             command,
-            input=query,
+            input=json.dumps({"queries": queries}) if batched else queries[0],
             text=True,
             capture_output=True,
             timeout=SEMANTIC_TIMEOUT_SECONDS,
@@ -3438,11 +4060,12 @@ def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "")
         if proc.returncode != 0 or not proc.stdout.strip():
             return {}
         payload = json.loads(proc.stdout)
-        return {
-            hit["id"]: float(hit["cos"])
-            for hit in payload.get("hits", [])
-            if isinstance(hit, dict) and "id" in hit and "cos" in hit
-        }
+        if not batched:
+            return {queries[0]: _semantic_hit_map(payload)}
+        rows = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(rows, list) or len(rows) != len(queries):
+            return {}
+        return {query: _semantic_hit_map(row) for query, row in zip(queries, rows)}
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return {}
 
@@ -3523,11 +4146,24 @@ def damped_query_terms(
     blobs = [f"{record['name']} {record['description']}".lower() for record in pool]
     threshold = total * IDF_DAMP_RATIO
     adjusted: list[tuple[str, float]] = []
+    rare_content_term = False
+    common_content_term = False
     for term, weight in terms:
         frequency = sum(1 for blob in blobs if term in blob)
         if frequency > threshold:
+            common_content_term = common_content_term or weight >= 1.0
             weight *= IDF_DAMP_FACTOR
+        elif frequency and weight >= 1.0:
+            rare_content_term = True
         adjusted.append((term, weight))
+    # search_score() only counts full-weight terms as real matches. When every
+    # content term that occurs in the pool is common, damping them all made every
+    # record score zero and the router returned nothing (e.g. "write python
+    # tests" in a large Python-heavy library, or any search inside a homogeneous
+    # corpus). Damping is relative: with no rare term to prefer -- a term that
+    # matches nothing is not one -- keep the query as typed.
+    if common_content_term and not rare_content_term:
+        return terms
     return adjusted
 
 
@@ -3571,6 +4207,10 @@ def ranked_records(
         score += SEMANTIC_BONUS * normalized_cosine(cosine)
         blended.append((score, record))
 
+    shards = [record for record in records if record.get("parent") and record_is_eligible(record, runtime)]
+    if shards:
+        blended = roll_up_resources(blended, compatible, shards, query, runtime, terms, aliases)
+
     ordered = sorted(
         blended,
         key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]),
@@ -3584,6 +4224,73 @@ def ranked_records(
         seen.add(key)
         unique.append((score, record))
     return unique
+
+
+def roll_up_resources(
+    blended: list[tuple[float, dict[str, Any]]],
+    compatible: list[dict[str, Any]],
+    shards: list[dict[str, Any]],
+    query: str,
+    runtime: str,
+    terms: list[tuple[str, float]],
+    aliases: dict[str, str],
+) -> list[tuple[float, dict[str, Any]]]:
+    """Lift each resource corpus by its best-matching shards.
+
+    Shards are scored lexically with the same terms as everything else --
+    exact statute names, section numbers and legal vocabulary are where lexical
+    matching is strongest, and shards are not in the semantic index. A corpus
+    scores the higher of its own score and its best shard's, and carries its
+    top shards as `resources`. A parent that is ineligible or denied is not in
+    `compatible`, so its shards stay hidden with it.
+    """
+    hits_by_parent: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
+    for shard in shards:
+        score = search_score(shard, query, runtime, terms, aliases.get(shard["id"], ""))
+        if score > 0:
+            hits_by_parent[shard["parent"]].append((score, shard))
+    if not hits_by_parent:
+        return blended
+    parents = {record["id"]: record for record in compatible if record["id"] in hits_by_parent}
+    positions = {record["id"]: index for index, (_score, record) in enumerate(blended)}
+    rolled = list(blended)
+    for parent_id, hits in hits_by_parent.items():
+        parent = parents.get(parent_id)
+        if parent is None:
+            continue
+        hits.sort(key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]))
+        top_k = parent.get("resource_top_k")
+        top_k = top_k if isinstance(top_k, int) and top_k > 0 else RESOURCE_TOP_K
+        enriched = {
+            **parent,
+            "resources": [
+                {
+                    "id": shard["id"],
+                    "type": shard["type"],
+                    "name": shard["name"],
+                    "description": clean_text(shard["description"], 160),
+                    "source_path": shard["source_path"],
+                    "score": round(score, 1),
+                }
+                for score, shard in hits[:top_k]
+            ],
+        }
+        best = hits[0][0]
+        if parent_id in positions:
+            index = positions[parent_id]
+            rolled[index] = (max(rolled[index][0], best), enriched)
+        else:
+            rolled.append((best, enriched))
+    return rolled
+
+
+def trusted_resources(record: dict[str, Any], verify_sources: bool) -> list[dict[str, Any]]:
+    resources = record.get("resources") or []
+    return [
+        resource
+        for resource in resources
+        if not verify_sources or record_source_is_trusted(resource)
+    ]
 
 
 def direct_relevance(record: dict[str, Any], query: str) -> int:
@@ -3634,10 +4341,28 @@ def capability_provenance(record: dict[str, Any]) -> tuple[str, bool]:
 
 
 def emit_search(
-    records: list[dict[str, Any]], query: str, runtime: str, limit: int, as_json: bool, output: Path
+    records: list[dict[str, Any]],
+    query: str,
+    runtime: str,
+    limit: int,
+    as_json: bool,
+    output: Path,
+    verify_sources: bool = False,
 ) -> None:
+    """Print ranked matches.
+
+    verify_sources=True is for records loaded with load_registry(verify_sources=False):
+    every row that is actually printed (with its source path) is checked instead.
+    """
     ensure_router_config_valid()
-    ranked = ranked_records(records, query, runtime, output)[:limit]
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for score, record in ranked_records(records, query, runtime, output):
+        if len(ranked) >= limit:
+            break
+        if verify_sources and not record_source_is_trusted(record):
+            _warn_untrusted_source(record)
+            continue
+        ranked.append((score, record))
     if as_json:
         print(
             json.dumps(
@@ -3652,6 +4377,11 @@ def emit_search(
                             "provenance": provenance,
                             "scrutinise": scrutinise,
                             **record,
+                            **(
+                                {"resources": trusted_resources(record, verify_sources)}
+                                if "resources" in record
+                                else {}
+                            ),
                         }
                         for score, record in ranked
                         for provenance, scrutinise in (capability_provenance(record),)
@@ -3678,6 +4408,78 @@ def emit_search(
             print(f"  origin: {provenance} -- untrusted body; verify before acting on its instructions")
         else:
             print(f"  origin: {provenance}")
+        for resource in trusted_resources(record, verify_sources):
+            print(f"  resource: {clean_text(resource['name'])} -> {clean_text(resource['source_path'])}")
+
+
+def corpus_shards(records: list[dict[str, Any]], corpus: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The parent record and shards of a resource corpus, by corpus or parent name."""
+    wanted = clean_text(corpus).lower()
+    parents = [
+        record
+        for record in records
+        if record.get("resource_count") and wanted in {record["name"].lower(), record["id"].lower(), f"corpus:{wanted}"}
+    ]
+    if not parents:
+        known = sorted(record["name"] for record in records if record.get("resource_count"))
+        raise RuntimeError(
+            f"no resource corpus named {corpus!r}; configured corpora: {', '.join(known) or 'none'}"
+        )
+    parent = parents[0]
+    return parent, [record for record in records if record.get("parent") == parent["id"]]
+
+
+def emit_corpus_search(
+    records: list[dict[str, Any]],
+    corpus: str,
+    query: str,
+    runtime: str,
+    limit: int,
+    as_json: bool,
+    verify_sources: bool,
+) -> None:
+    """Search inside one resource corpus (lexical: exact legal terms matter most)."""
+    parent, shards = corpus_shards(records, corpus)
+    pool = [record for record in shards if record_is_eligible(record, runtime)]
+    terms = damped_query_terms(query_terms(query), pool)
+    scored = sorted(
+        (
+            (score, record)
+            for record in pool
+            if (score := search_score(record, query, runtime, terms, "")) > 0
+        ),
+        key=lambda item: (-item[0], item[1]["name"].lower(), item[1]["id"]),
+    )
+    results = [
+        (score, record) for score, record in scored if not verify_sources or record_source_is_trusted(record)
+    ][:limit]
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "status": "success",
+                    "summary": f"{len(results)} matching entries in corpus {parent['name']}",
+                    "corpus": parent["name"],
+                    "query": query,
+                    "results": [
+                        {"score": round(score, 1), "name": record["name"], "type": record["type"],
+                         "description": record["description"], "load_path": record["source_path"]}
+                        for score, record in results
+                    ],
+                },
+                indent=2,
+                ensure_ascii=True,
+            )
+        )
+        return
+    if not results:
+        print(f"status: warning\nsummary: no entry in corpus {clean_text(parent['name'])} matches")
+        return
+    print(f"status: success\nsummary: {len(results)} matching entries in corpus {clean_text(parent['name'])}")
+    for score, record in results:
+        print(f"{clean_text(record['name'])} (score {score:.1f})")
+        print(f"  {clean_text(record['description'], 260)}")
+        print(f"  {clean_text(record['source_path'])}")
 
 
 def exact_record(
@@ -3773,9 +4575,7 @@ def policy_pack_for(project: str) -> dict[str, Any]:
     return data
 
 
-KNOWN_CAPABILITY_TYPES = {
-    "skill", "plugin", "mcp", "tool", "toolset", "agent", "command", "entrypoint",
-}
+
 
 
 def policy_denies(pack: dict[str, Any], record: dict[str, Any]) -> bool:
@@ -3855,6 +4655,8 @@ def context_savings(
     selected: list[dict[str, Any]],
     *,
     estimate_tokens: bool,
+    shards: Optional[list[dict[str, Any]]] = None,
+    selected_shard_paths: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     """Quantify how much capability context routing avoids for this task.
 
@@ -3878,6 +4680,18 @@ def context_savings(
     }
     if eligible_count:
         summary["selected_fraction"] = round(selected_count / eligible_count, 4)
+    shards = shards or []
+    selected_shard_paths = selected_shard_paths or set()
+    if shards:
+        # Corpus shards are reported apart from routable capabilities: "loaded 6
+        # of 5,143 capabilities" is the routing decision, "5 of 21,087 shards"
+        # is the retrieval inside the selected corpus.
+        selected_shards = sum(1 for record in shards if record["source_path"] in selected_shard_paths)
+        summary["resource_shards"] = {
+            "indexed": len(shards),
+            "selected": selected_shards,
+            "avoided": max(len(shards) - selected_shards, 0),
+        }
     if not estimate_tokens:
         return summary
 
@@ -3888,6 +4702,11 @@ def context_savings(
         tokens = estimate_body_tokens(record)
         eligible_tokens += tokens
         if record["id"] in selected_ids:
+            selected_tokens += tokens
+    for record in shards:
+        tokens = estimate_body_tokens(record)
+        eligible_tokens += tokens
+        if record["source_path"] in selected_shard_paths:
             selected_tokens += tokens
     avoided_tokens = max(eligible_tokens - selected_tokens, 0)
     summary.update(
@@ -3912,10 +4731,42 @@ def bundle(
     max_count: int,
     output: Path,
     estimate_savings: bool = False,
+    verify_sources: bool = False,
+    decision: Optional[decision_provider.DecisionRun] = None,
 ) -> dict[str, Any]:
+    """Select a bounded, lane-structured portfolio for one task.
+
+    verify_sources=True is for records loaded with load_registry(verify_sources=False):
+    each selected row's source is checked before its load_path is handed out.
+
+    decision, when given, judges the top of the ranking (only rows this project
+    may use) and its probabilities are blended into the scores before lanes are
+    filled. Every policy below -- eligibility, deny rules, required lanes,
+    runtime access, the portfolio cap -- still decides; a failed or abstaining
+    provider leaves the ranking untouched.
+    """
     ensure_router_config_valid()
     pack = policy_pack_for(project)
+    intents = query_intents(query)
+    if intents:
+        # One sidecar process embeds the task and every intent together; the
+        # ranked_records() calls below then read the memoized results.
+        semantic_hits_many(output, [query, *intents], registry_manifest_fingerprint(str(output)), runtime)
     ranked = ranked_records(records, query, runtime, output)
+    decision_scores: dict[str, float] = {}
+    if decision is not None:
+        decision_scores = decision(
+            ranked,
+            lambda record: not policy_denies(pack, record)
+            and (not verify_sources or record_source_is_trusted(record)),
+        )
+        ranked = decision_provider.blend(ranked, decision_scores, decision.settings.weight)
+
+    def rank(text: str) -> list[tuple[float, dict[str, Any]]]:
+        ordered = ranked_records(records, text, runtime, output)
+        if decision_scores and decision is not None:
+            ordered = decision_provider.blend(ordered, decision_scores, decision.settings.weight)
+        return ordered
     selected: list[dict[str, Any]] = []
 
     def semantic_key_for(record: dict[str, Any]) -> tuple[str, str]:
@@ -3945,6 +4796,16 @@ def bundle(
                 raise RuntimeError(f"Required {lane} capability is not usable in {runtime}: {record['name']}")
             return
         if policy_denies(pack, record):
+            return
+        if verify_sources and not record_source_is_trusted(record):
+            # The registry was loaded without per-row source checks; a row whose
+            # body left the trusted roots is never handed to the agent as a
+            # load_path.
+            if required:
+                raise RuntimeError(
+                    f"Required {lane} capability source is outside the trusted roots: {record['name']}; run rebuild"
+                )
+            _warn_untrusted_source(record)
             return
         semantic_key = semantic_key_for(record)
         existing = next(
@@ -4006,7 +4867,9 @@ def bundle(
                 ),
                 "load_path": source_load_path(record),
                 "invoke": (
-                    record["name"]
+                    "Read the resources listed below: the entries of this corpus that best match the task"
+                    if record["type"] == "corpus"
+                    else record["name"]
                     if record["type"] in {"mcp", "tool"}
                     else (
                         f"Activate Hermes toolset {record['name'].removeprefix('hermes:')} "
@@ -4020,6 +4883,12 @@ def bundle(
                 "semantic_key": semantic_key,
             }
         )
+        resources = trusted_resources(record, verify_sources)
+        if resources:
+            selected[-1]["resources"] = [
+                {"name": item["name"], "type": item["type"], "load_path": item["source_path"], "score": item["score"]}
+                for item in resources
+            ]
 
     normalized = clean_text(query).lower()
     complex_task = len(query_terms(query)) >= 5 or bool(
@@ -4146,11 +5015,10 @@ def bundle(
     # Multi-intent seeding: give every distinct intent at least one primary slot before
     # the generic loop runs, otherwise a route that pre-fills the primaries makes the
     # second intent unrepresentable no matter how well it scored.
-    intents = query_intents(query)
     primary_cap = min(2 * len(intents), 4) if intents else 2
     for intent in intents:
-        for score, record in ranked_records(records, intent, runtime, output):
-            if record["type"] not in {"skill", "entrypoint", "agent", "command"}:
+        for score, record in rank(intent):
+            if record["type"] not in PRIMARY_TYPES:
                 continue
             if primary_added >= primary_cap:
                 break
@@ -4167,7 +5035,7 @@ def bundle(
         # generic candidate as the decay baseline so the 0.55 cutoff stays live.
         if primary_added > 0 and top_primary_score == 0.0:
             top_primary_score = score
-        if record["type"] not in {"skill", "entrypoint", "agent", "command"}:
+        if record["type"] not in PRIMARY_TYPES:
             continue
         if record["category"] == "testing-security" and primary_added == 0:
             # Defer testing-security records while other primaries exist to add;
@@ -4286,11 +5154,18 @@ def bundle(
         "output": 5,
         "support": 6,
     }
-    selected.sort(key=lambda item: (lane_order.get(item["lane"], 99), -item["score"], item["name"].lower()))
     if complex_task and not any(item["lane"] == "primary" for item in selected):
         if skipped_testing_best is not None:
-            add(skipped_testing_best[1], "primary", "Best available primary method for this task.",
-                skipped_testing_best[0])
+            best_score, best_record = skipped_testing_best
+            reason = "Best available primary method for this task."
+            # The support loop may already have picked it; promoting that entry
+            # is the only way to give the bundle a primary (add() dedupes by id).
+            existing = next((item for item in selected if item["id"] == best_record["id"]), None)
+            if existing is not None:
+                existing["lane"] = "primary"
+                existing["reason"] = reason
+            else:
+                add(best_record, "primary", reason, best_score)
         else:
             # Fresh installs legitimately have tiny/empty indexes: degrade to a
             # warning instead of failing the flagship demo path.
@@ -4308,13 +5183,20 @@ def bundle(
                 ],
                 "artifacts": {"index": str(output / "Capabilities.md")},
             }
+    # Sort last so a fallback primary lands in lane order, not after support.
+    selected.sort(key=lambda item: (lane_order.get(item["lane"], 99), -item["score"], item["name"].lower()))
     for item in selected:
         item.pop("semantic_key", None)
-    eligible_records = [
+    eligible_all = [
         record
         for record in records
         if record_is_eligible(record, runtime) and not policy_denies(pack, record)
     ]
+    eligible_records = [record for record in eligible_all if not record.get("parent")]
+    shard_records = [record for record in eligible_all if record.get("parent")]
+    selected_resource_ids = {
+        resource["load_path"]: resource for item in selected for resource in item.get("resources", [])
+    }
     return {
         "status": "success" if selected else "warning",
         "summary": (
@@ -4325,7 +5207,13 @@ def bundle(
         "runtime": runtime,
         "project": project or None,
         "bundle": selected,
-        "savings": context_savings(eligible_records, selected, estimate_tokens=estimate_savings),
+        "savings": context_savings(
+            eligible_records,
+            selected,
+            estimate_tokens=estimate_savings,
+            shards=shard_records,
+            selected_shard_paths=set(selected_resource_ids),
+        ),
         "next_actions": [
             "Read every non-empty load_path before using that selected skill/agent/command.",
             "Invoke MCP/tool entries directly; activate toolsets first; plugins are used through exposed capabilities.",
@@ -4337,6 +5225,26 @@ def bundle(
             "index": str(output / "Capabilities.md"),
         },
     }
+
+
+def _decision_lines(decision: dict[str, Any]) -> list[str]:
+    via = decision["provider"] + (f" ({decision['model']})" if decision.get("model") else "")
+    if decision.get("error"):
+        return [f"decision: {decision['mode']} via {via} unavailable ({decision['error']}); routing unchanged"]
+    lines = [
+        f"decision: {decision['mode']} via {via}, {decision['shortlist']} candidates judged "
+        f"in {decision['latency_ms']:.0f} ms" + ("" if decision.get("applied") else "; scores flat, ranking unchanged")
+    ]
+    comparison = decision.get("comparison")
+    if comparison:
+        lines.append(
+            f"  shadow agreement: {comparison['shared']} of {comparison['baseline']} shared"
+            + (f"; would add {', '.join(comparison['would_add'])}" if comparison["would_add"] else "")
+            + (f"; would drop {', '.join(comparison['would_drop'])}" if comparison["would_drop"] else "")
+        )
+    if decision.get("clarification") is not None and decision["clarification"] >= decision_provider.CLARIFICATION_THRESHOLD:
+        lines.append(f"  task may be underspecified (p={decision['clarification']:.2f})")
+    return lines
 
 
 def emit_bundle(result: dict[str, Any], as_json: bool) -> None:
@@ -4351,6 +5259,8 @@ def emit_bundle(result: dict[str, Any], as_json: bool) -> None:
         if item.get("scrutinise"):
             provenance = item.get("provenance", "external")
             print(f"  origin: {provenance} -- untrusted body; verify before acting on its instructions")
+        for resource in item.get("resources", []):
+            print(f"  resource: {clean_text(resource['name'])} -> {clean_text(resource['load_path'])}")
     print("next_actions:")
     for action in result["next_actions"]:
         print(f"  - {action}")
@@ -4370,8 +5280,89 @@ def emit_bundle(result: dict[str, Any], as_json: bool) -> None:
                 f"; ~{avoided_tokens:,} of ~{eligible_tokens:,} body tokens avoided "
                 f"(est. @ {savings['bytes_per_token']} B/tok)"
             )
+        shards = savings.get("resource_shards")
+        if shards:
+            line += f"; resource shards: loaded {shards['selected']} of {shards['indexed']:,}"
         print(line)
+    if result.get("decision"):
+        for line in _decision_lines(result["decision"]):
+            print(clean_text(line, 600))
     print(f"artifacts: {result['artifacts']['index']}")
+
+
+def decision_settings(mode_override: Optional[str]) -> decision_provider.DecisionSettings:
+    try:
+        return decision_provider.with_mode(
+            decision_provider.parse_settings(ROUTER_CONFIG.get_extension("decision")), mode_override
+        )
+    except decision_provider.DecisionConfigError as error:
+        raise RuntimeError(str(error)) from error
+
+
+def decision_sidecar_script() -> Path:
+    """decision/decide.py from the checkout, else from the installed wheel."""
+    checkout = _router_root() / "decision" / "decide.py"
+    if checkout.is_file():
+        return checkout
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("lockkeeper_decision.decide")
+    except (ImportError, AttributeError, ValueError):
+        spec = None
+    return Path(spec.origin) if spec is not None and spec.origin else checkout
+
+
+def route_with_decision(
+    records: list[dict[str, Any]],
+    query: str,
+    runtime: str,
+    project: str,
+    max_count: int,
+    output: Path,
+    *,
+    settings: decision_provider.DecisionSettings,
+    estimate_savings: bool = False,
+    verify_sources: bool = False,
+) -> dict[str, Any]:
+    """bundle(), plus the optional decision stage in shadow or rerank mode.
+
+    shadow: the returned bundle is exactly what routing produces without a
+    provider; the provider's alternative is attached for comparison only.
+    rerank: the provider's evidence is blended into the ranking that fills the
+    lanes. With the provider off this is bundle() unchanged.
+    """
+    common = dict(estimate_savings=estimate_savings, verify_sources=verify_sources)
+    if not settings.enabled:
+        return bundle(records, query, runtime, project, max_count, output, **common)
+    try:
+        provider = decision_provider.make_provider(settings, output=output, sidecar_script=decision_sidecar_script())
+    except decision_provider.DecisionConfigError as error:
+        result = bundle(records, query, runtime, project, max_count, output, **common)
+        result["decision"] = {
+            "mode": settings.mode, "provider": settings.provider, "model": settings.model or None,
+            "latency_ms": 0.0, "shortlist": 0, "applied": False, "error": str(error), "clarification": None,
+        }
+        return result
+    run = decision_provider.DecisionRun(provider, settings, query)
+    if settings.mode == "rerank":
+        result = bundle(records, query, runtime, project, max_count, output, decision=run, **common)
+        result["decision"] = run.report("rerank")
+        clarification = result["decision"].get("clarification")
+        if clarification is not None and clarification >= decision_provider.CLARIFICATION_THRESHOLD:
+            result.setdefault("next_actions", []).insert(
+                0, "The task looks underspecified: ask the user a clarifying question before loading capabilities."
+            )
+        return result
+    result = bundle(records, query, runtime, project, max_count, output, **common)
+    shadow = bundle(records, query, runtime, project, max_count, output, decision=run, **common)
+    report = run.report("shadow")
+    report["bundle"] = [
+        {"lane": item["lane"], "type": item["type"], "name": item["name"]} for item in shadow.get("bundle", [])
+    ]
+    report["comparison"] = decision_provider.compare_bundles(result.get("bundle", []), shadow.get("bundle", []))
+    result["decision"] = report
+    return result
 
 
 class RegistryArgumentParser(argparse.ArgumentParser):
@@ -4497,7 +5488,7 @@ def remove_pristine_hermes_profile_bundles() -> int:
     if not HERMES_PROFILES or not (shared_root / ".bundled_manifest").is_file():
         return 0
     result = subprocess.run(
-        ["hermes", "-p", HERMES_PROFILES[0], "skills", "opt-out", "--remove", "--yes"],
+        _resolve_cli(["hermes", "-p", HERMES_PROFILES[0], "skills", "opt-out", "--remove", "--yes"]),
         cwd=ROUTER_CONFIG.cwd,
         text=True,
         encoding="utf-8",
@@ -5068,6 +6059,9 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--stdin", action="store_true", dest="read_stdin", help="Read task text from stdin")
     search_parser.add_argument("--runtime", choices=["codex", "claude", "hermes", "jcode", "shared"], default="codex")
     search_parser.add_argument("--limit", type=int, default=12)
+    search_parser.add_argument(
+        "--corpus", help="Search inside one resource corpus ([[extensions.resource_corpora]]) instead"
+    )
     search_parser.add_argument("--json", action="store_true")
 
     bundle_parser = subparsers.add_parser(
@@ -5087,6 +6081,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="estimate_savings",
         help="Estimate body tokens kept out of context (stats every eligible skill body; adds latency)",
+    )
+    bundle_parser.add_argument(
+        "--decision",
+        choices=list(decision_provider.MODES),
+        help=(
+            "Decision-provider stage (configured in [extensions.decision]): shadow reports the "
+            "provider's alternative next to the normal route; rerank blends it into ranking; off disables"
+        ),
     )
     bundle_parser.add_argument("--json", action="store_true")
 
@@ -5283,11 +6285,14 @@ def main() -> int:
     output = args.output.expanduser().resolve(strict=False)
     try:
         if args.command == "rebuild":
-            rebuild(output)
-            # A rebuild moves the fingerprint, which invalidates the vectors. Refreshing them
-            # here is what makes the documented `snapshot-runtimes -> rebuild -> check` path
-            # actually leave the router whole instead of quietly lexical-only.
-            reindex_semantic(output)
+            # One lock around both steps, so a concurrent query never self-heals
+            # into the gap between the new registry and its vectors.
+            with registry_write_lock(output):
+                rebuild(output)
+                # A rebuild moves the fingerprint, which invalidates the vectors. Refreshing
+                # them here is what makes the documented `snapshot-runtimes -> rebuild ->
+                # check` path actually leave the router whole instead of lexical-only.
+                reindex_semantic(output)
         elif args.command == "reindex":
             reindex_semantic(output)
         elif args.command == "snapshot-runtimes":
@@ -5305,8 +6310,15 @@ def main() -> int:
             if not 1 <= args.limit <= 100:
                 raise RuntimeError("--limit must be between 1 and 100")
             query = query_from_args(args)
-            ensure_query_registry_fresh(output)
-            emit_search(load_registry(output), query, args.runtime, args.limit, args.json, output)
+            records = ensure_query_registry_fresh(output)
+            if records is None:
+                records = load_registry(output, verify_sources=False)
+            if args.corpus:
+                emit_corpus_search(
+                    records, args.corpus, query, args.runtime, args.limit, args.json, verify_sources=True
+                )
+            else:
+                emit_search(records, query, args.runtime, args.limit, args.json, output, verify_sources=True)
         elif args.command == "bundle":
             if not 3 <= args.max_count <= 12:
                 raise RuntimeError("--max must be between 3 and 12")
@@ -5319,15 +6331,20 @@ def main() -> int:
                     raise RuntimeError(
                         f"unknown project {args.project!r}; configured projects: {listing}"
                     )
-            ensure_query_registry_fresh(output)
-            result = bundle(
-                load_registry(output),
+            settings = decision_settings(getattr(args, "decision", None))
+            records = ensure_query_registry_fresh(output)
+            if records is None:
+                records = load_registry(output, verify_sources=False)
+            result = route_with_decision(
+                records,
                 query,
                 args.runtime,
                 project,
                 args.max_count,
                 output,
+                settings=settings,
                 estimate_savings=getattr(args, "estimate_savings", False),
+                verify_sources=True,
             )
             emit_bundle(result, args.json)
         elif args.command == "check":

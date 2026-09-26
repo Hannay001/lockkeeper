@@ -42,6 +42,7 @@ both sides would just add a constant the model has to encode away.
 Verbs:
   build --registry <registry.jsonl> --out <dir>   write embeddings.bin + embeddings.json
   query --index <dir> [--topk N]                  read query on stdin, emit {"hits":[...]}
+  query --index <dir> --batch                     read {"queries":[...]}, emit {"results":[...]}
 
 Contract with the router: any failure here (missing model, no network, bad index, timeout)
 must leave the router working. It degrades to lexical-only scoring. Never raise into it.
@@ -63,6 +64,30 @@ DIM = 384
 
 # BGE's retrieval instruction. Query side ONLY -- see module docstring.
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Write via a sibling temp file + os.replace so readers never see a torn file.
+
+    The router bounds auto-heal reindexing with a timeout and kills the sidecar
+    when it expires; a direct write interrupted there left embeddings.bin with a
+    different row count than embeddings.json, and every later query failed to
+    reshape it and silently scored lexical-only.
+    """
+    import os
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False)
+    temp = Path(handle.name)
+    try:
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        if temp.exists():
+            temp.unlink()
 
 
 def _load_model():
@@ -159,7 +184,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         for row, i in zip(fresh, to_embed, strict=True):
             vectors[i] = row
 
-    (out / "embeddings.bin").write_bytes(vectors.tobytes())
+    # Vectors first, metadata last: the metadata's registry_fingerprint is what
+    # declares the pair current, so it must never point at vectors not yet on disk.
+    _atomic_write_bytes(out / "embeddings.bin", vectors.tobytes())
     meta = {
         "schema_version": SCHEMA_VERSION,
         "model": MODEL_NAME,
@@ -169,7 +196,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         "hashes": hashes,
         "registry_fingerprint": args.fingerprint or "",
     }
-    (out / "embeddings.json").write_text(json.dumps(meta), encoding="utf-8")
+    _atomic_write_bytes(out / "embeddings.json", json.dumps(meta).encode("utf-8"))
     reused = len(rankable) - len(to_embed)
     print(
         f"status: success\n"
@@ -262,17 +289,30 @@ def cmd_query(args: argparse.Namespace) -> int:
     matrix = np.frombuffer((index / "embeddings.bin").read_bytes(), dtype=np.float32)
     matrix = matrix.reshape(count, dim)
 
-    text = sys.stdin.read().strip()
-    if not text:
-        print(json.dumps({"hits": []}))
+    raw = sys.stdin.read()
+    if args.batch:
+        # {"queries": [...]} -> {"results": [{"hits": [...]}, ...]} in input order.
+        # One process, one model load, one embed call for every query.
+        try:
+            queries = [str(item).strip() for item in json.loads(raw).get("queries", [])]
+        except (ValueError, AttributeError):
+            queries = []
+    else:
+        queries = [raw.strip()]
+    if not any(queries):
+        empty = [{"hits": []} for _ in queries]
+        print(json.dumps({"results": empty} if args.batch else {"hits": []}))
         return 0
 
     model = _load_model()
-    vector = np.array(next(iter(model.embed([QUERY_PREFIX + text]))), dtype=np.float32)
-    norm = np.linalg.norm(vector) or 1.0
-    vector /= norm
+    present = [query for query in queries if query]
+    vectors = np.array(list(model.embed([QUERY_PREFIX + query for query in present])), dtype=np.float32)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    vectors /= norms
+    by_query = dict(zip(present, vectors, strict=True))
 
-    scores = matrix @ vector  # cosine: both sides are L2-normalized
+    records = None
     if args.registry:
         records = []
         with Path(args.registry).open(encoding="utf-8") as handle:
@@ -280,16 +320,23 @@ def cmd_query(args: argparse.Namespace) -> int:
                 line = line.strip()
                 if line:
                     records.append(json.loads(line))
-        hits = runtime_grouped_hits(meta["ids"], scores, records, args.runtime, args.topk)
-    else:
+
+    def hits_for(vector) -> list[dict]:
+        scores = matrix @ vector  # cosine: both sides are L2-normalized
+        if records is not None:
+            return runtime_grouped_hits(meta["ids"], scores, records, args.runtime, args.topk)
         topk = min(max(args.topk, 0), count)
-        if topk:
-            top = np.argpartition(-scores, topk - 1)[:topk]
-            top = top[np.argsort(-scores[top])]
-            hits = [{"id": meta["ids"][i], "cos": round(float(scores[i]), 4)} for i in top]
-        else:
-            hits = []
-    print(json.dumps({"model": MODEL_NAME, "dim": dim, "hits": hits}))
+        if not topk:
+            return []
+        top = np.argpartition(-scores, topk - 1)[:topk]
+        top = top[np.argsort(-scores[top])]
+        return [{"id": meta["ids"][i], "cos": round(float(scores[i]), 4)} for i in top]
+
+    results = [{"hits": hits_for(by_query[query]) if query else []} for query in queries]
+    if args.batch:
+        print(json.dumps({"model": MODEL_NAME, "dim": dim, "results": results}))
+    else:
+        print(json.dumps({"model": MODEL_NAME, "dim": dim, "hits": results[0]["hits"]}))
     return 0
 
 
@@ -308,6 +355,11 @@ def main() -> int:
     query.add_argument("--topk", type=int, default=200)
     query.add_argument("--registry", default="")
     query.add_argument("--runtime", default="")
+    query.add_argument(
+        "--batch",
+        action="store_true",
+        help='read {"queries": [...]} on stdin and emit {"results": [...]} in the same order',
+    )
     query.set_defaults(func=cmd_query)
 
     args = parser.parse_args()

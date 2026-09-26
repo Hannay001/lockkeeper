@@ -33,7 +33,38 @@ from typing import Iterable, Optional
 
 AUDIT_MAX_BYTES = 8 * 1024 * 1024
 
-AUDITABLE_SUFFIXES = {".md", ".json", ".toml", ".yaml", ".yml", ".mjs", ".js", ".py", ".sh", ".txt"}
+AUDITABLE_SUFFIXES = {
+    ".md", ".json", ".toml", ".yaml", ".yml", ".mjs", ".js", ".py", ".sh", ".txt",
+    # Scripts and configs a capability can execute or feed to a shell. Before
+    # these were listed, `curl ... | sh` in setup.bash, a PowerShell
+    # download-and-run in run.ps1, or a TypeScript helper audited clean because
+    # the file was never read.
+    ".bash", ".zsh", ".fish", ".ksh", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".vbs",
+    ".ts", ".tsx", ".jsx", ".cjs", ".mts", ".cts", ".rb", ".pl", ".pm", ".php", ".lua",
+    ".go", ".rs", ".java", ".kt", ".swift", ".r", ".applescript",
+    ".html", ".htm", ".xml", ".ini", ".cfg", ".conf", ".env", ".mdx", ".rst", ".ipynb",
+    ".j2", ".jinja", ".tmpl", ".tpl", ".sql", ".plist", ".service",
+}
+# Conventional extensionless files that are executed or sourced as-is.
+AUDITABLE_NAMES = {
+    "Makefile", "makefile", "GNUmakefile", "Dockerfile", "Containerfile", "Justfile",
+    "justfile", "Rakefile", "Gemfile", "Procfile", "Vagrantfile",
+    ".env", ".envrc", ".bashrc", ".zshrc", ".profile", ".npmrc", ".pypirc",
+}
+
+
+def _is_auditable_text(path: Path) -> bool:
+    """Known text types, conventional script names, and any shebang file."""
+    if path.suffix.lower() in AUDITABLE_SUFFIXES or path.name in AUDITABLE_NAMES:
+        return True
+    if path.name.startswith(".env"):
+        return True  # .env.local, .env.production, ...
+    try:
+        with path.open("rb") as handle:
+            # An extensionless `install` with a shebang runs as a program.
+            return handle.read(2) == b"#!"
+    except OSError:
+        return False
 
 # Executable/bytecode payloads are not auditable as text, but shipping them
 # inside a capability directory is itself a smuggling signal: they are hashed
@@ -64,6 +95,7 @@ RULE_TAXONOMY: dict[str, str] = {
     "url_data_beacon": "T03",
     "backtick_substitution_exfil": "T03",
     "non_text_payload": "T03",
+    "linked_payload": "T04",
     "obfuscated_execution": "T04",
     "non_utf8_content": "T04",
     "oversized_skipped": "T04",
@@ -90,8 +122,8 @@ RULES: list[tuple[str, str, re.Pattern[str], str]] = [
         "exfiltration_pipeline",
         "critical",
         re.compile(
-            r"(?:curl|wget|nc|netcat|Invoke-WebRequest|Invoke-RestMethod|requests\.post|fetch\()"
-            r"[^|\n]*\|\s*(?:sh|bash|zsh|python\w*)"
+            r"(?:curl|wget|nc|netcat|Invoke-WebRequest|Invoke-RestMethod|\biwr\b|\birm\b|requests\.post|fetch\()"
+            r"[^|\n]*\|\s*(?:sh|bash|zsh|python\w*|pwsh|powershell|iex\b|Invoke-Expression)"
             # cap-audit-suppress (next line documents the exfiltration shape)
             r"|(?:cat|print|echo|type)\s[^|\n]*(?:\.env|id_rsa|credentials|\.aws|keychain)[^|\n]*\|"
             r"[^|\n]*(?:curl|wget|nc|http)",
@@ -607,7 +639,7 @@ def audit_path(path: Path) -> Optional[FileReport]:
             ]
         digest = hashlib.sha256(blob).hexdigest()
         return FileReport(path=str(resolved), sha256=digest, verdict=_verdict(findings), findings=findings)
-    if suffix not in AUDITABLE_SUFFIXES:
+    if not _is_auditable_text(resolved):
         return None
     try:
         if resolved.stat().st_size > AUDIT_MAX_BYTES:
@@ -655,7 +687,13 @@ def audit_targets(
             skipped.append(str(target))
             continue
         if target.is_dir():
+            scope = target.resolve(strict=False)
             for candidate in sorted(target.rglob("*") if recursive else target.glob("*")):
+                if _is_link_like(candidate):
+                    link_report = _link_report(candidate, scope)
+                    if link_report is not None:
+                        reports.append(link_report)
+                    continue
                 report = audit_path(candidate)
                 if report is not None:
                     reports.append(report)
@@ -668,13 +706,55 @@ def audit_targets(
     return reports, skipped
 
 
+def _link_report(link: Path, scope: Path) -> Optional[FileReport]:
+    """Surface a symlink (or junction) found inside an audited directory.
+
+    Links are never followed, so their targets were silently unaudited: a skill
+    could ship scripts/setup.sh -> /tmp/payload.sh, pass as clean, and change
+    the payload after the audit. A link that stays inside the audited directory
+    is harmless (its target is audited in its own right) and is skipped; one
+    that leaves it is a high finding, which floors the capability to suspect.
+    """
+    import hashlib
+
+    try:
+        raw_target = os.readlink(link)
+    except OSError:
+        raw_target = "<unreadable link>"
+    resolved = link.resolve(strict=False)
+    try:
+        resolved.relative_to(scope)
+        return None
+    except ValueError:
+        pass
+    finding = Finding(
+        rule_id="linked_payload",
+        severity="high",
+        title="Symlink leaves the audited directory; its target was not scanned",
+        line=0,
+        excerpt=_sanitize_excerpt(f"-> {raw_target}")[:160],
+    )
+    return FileReport(
+        # Bracketed like other synthetic entries so receipt file verification,
+        # which rehashes regular files, does not treat the link as missing.
+        path=f"<link:{link}>",
+        sha256=hashlib.sha256(str(raw_target).encode("utf-8", errors="replace")).hexdigest(),
+        verdict=_verdict([finding]),
+        findings=[finding],
+    )
+
+
 # --- Optional dependency CVE gate (opt-in via --check-deps; network used
 # only for the keyless osv.dev batch API, failures degrade to info). ---
 
 _REQUIREMENT_RE = re.compile(
     r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*(?P<ver>[A-Za-z0-9][A-Za-z0-9._!*+~-]*)"
 )
-_NPM_VERSION_RE = re.compile(r"\"(?P<name>@?[A-Za-z0-9][A-Za-z0-9._/-]*)\"\s*:\s*\"(?P<ver>\d[0-9A-Za-z.+~^-]*)\"")
+# Only an exact semver is a pin. "1.x", "1.2.x" and "1.2" are ranges that osv.dev
+# cannot evaluate, so they used to be queried as literal versions and come back
+# "no known vulnerabilities" -- a false clean.
+_NPM_EXACT_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+OSV_BATCH_LIMIT = 1000  # api.osv.dev/v1/querybatch rejects larger batches
 
 
 def parse_dependency_manifests(text: str, filename: str) -> tuple[list[tuple[str, str, str]], int]:
@@ -722,9 +802,9 @@ def parse_dependency_manifests(text: str, filename: str) -> tuple[list[tuple[str
                 if not isinstance(entries, dict):
                     continue
                 for name, spec in entries.items():
-                    match = _NPM_VERSION_RE.search(f'"{name}": "{spec}"')
-                    if match:
-                        deps.append(("npm", name, match.group("ver")))
+                    version = str(spec).strip().removeprefix("=").strip() if isinstance(spec, str) else ""
+                    if isinstance(name, str) and _NPM_EXACT_VERSION_RE.match(version):
+                        deps.append(("npm", name, version))
                     else:
                         unpinned += 1
     return deps, unpinned
@@ -737,17 +817,25 @@ def query_osv_batch(deps: list[tuple[str, str, str]]) -> dict[tuple[str, str, st
     """
     if not deps:
         return {}
-    payload = json.dumps(
-        {"queries": [{"package": {"ecosystem": eco, "name": name}, "version": ver} for eco, name, ver in deps]}
-    ).encode("utf-8")
-    request = urllib.request.Request(  # noqa: S310 - fixed https endpoint, no user input in URL
-        "https://api.osv.dev/v1/querybatch",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
-        results = json.loads(response.read().decode("utf-8")).get("results", [])
+    results: list = []
+    for start in range(0, len(deps), OSV_BATCH_LIMIT):
+        chunk = deps[start : start + OSV_BATCH_LIMIT]
+        payload = json.dumps(
+            {"queries": [{"package": {"ecosystem": eco, "name": name}, "version": ver} for eco, name, ver in chunk]}
+        ).encode("utf-8")
+        request = urllib.request.Request(  # noqa: S310 - fixed https endpoint, no user input in URL
+            "https://api.osv.dev/v1/querybatch",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+            chunk_results = json.loads(response.read().decode("utf-8")).get("results", [])
+        if not isinstance(chunk_results, list) or len(chunk_results) != len(chunk):
+            # A short or malformed answer cannot be aligned with its queries;
+            # treat it as unavailable rather than attributing vulns to the wrong deps.
+            raise ValueError("osv.dev returned a result list that does not match the query batch")
+        results.extend(chunk_results)
     found: dict[tuple[str, str, str], list[str]] = {}
     safe_id = re.compile(r"[^A-Za-z0-9._/-]").sub
     for dep, result in zip(deps, results, strict=False):
@@ -768,7 +856,11 @@ def dependency_findings(target: Path) -> tuple[list[Finding], list[str]]:
     manifest_paths: dict[str, Path] = {}
     unpinned_counts: dict[str, int] = {}
     for candidate in sorted(resolved.rglob("*")):
-        if "__pycache__" in candidate.parts or candidate.name not in ("requirements.txt", "package.json"):
+        if candidate.name not in ("requirements.txt", "package.json"):
+            continue
+        # Vendored trees hold their dependencies' own manifests (ranges, not
+        # this capability's pins); counting them buried the real result.
+        if any(part in {"__pycache__", "node_modules", ".git"} for part in candidate.relative_to(resolved).parts):
             continue
         if not candidate.is_file() or _is_link_like(candidate):
             continue
@@ -949,7 +1041,11 @@ def run_audit_flow(
                 try:
                     text = source.read_text(encoding="utf-8", errors="ignore")[:_LLM_MAX_CHARS]
                     report.findings.extend(llm_scan_text(text, source))
-                    report.verdict = _verdict(report.findings)
+                    # The second pass may only escalate. Recomputing from the
+                    # findings alone dropped floors applied outside _verdict
+                    # (non-UTF-8 content, suppression markers), so enabling
+                    # --llm-scan turned a suspect file clean.
+                    report.verdict = _worse_verdict(report.verdict, _verdict(report.findings))
                 except Exception as error:  # provider flake must not kill the scan
                     errors += 1
                     report.findings.append(
@@ -1139,7 +1235,17 @@ def verify_files_against_receipt(
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         return False, f"invalid receipt: unreadable ({error})"
-    base = base_dir or receipt_path.parent
+    # Relative entries were recorded relative to the directory the audit ran
+    # from. That directory is part of the signed payload (callers verify the
+    # HMAC first); resolving against the receipt's own folder instead reported
+    # an unchanged tree as "missing" whenever the target was a relative path.
+    scanned_from = receipt.get("scanned_from") if isinstance(receipt, dict) else None
+    if base_dir is not None:
+        base = base_dir
+    elif isinstance(scanned_from, str) and scanned_from and Path(scanned_from).is_dir():
+        base = Path(scanned_from)
+    else:
+        base = receipt_path.parent
     mismatches: list[str] = []
     missing: list[str] = []
     checked = 0
@@ -1174,6 +1280,10 @@ def overall_verdict(reports: list[FileReport]) -> str:
 
 
 SEVERITY_ORDER_VERDICT = {"clean": 0, "suspect": 1, "hostile": 2}
+
+
+def _worse_verdict(first: str, second: str) -> str:
+    return first if SEVERITY_ORDER_VERDICT[first] >= SEVERITY_ORDER_VERDICT[second] else second
 
 STRICT_EXIT_CODES = {"clean": 0, "suspect": 1, "hostile": 2}
 
@@ -1315,6 +1425,49 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
+HOOK_MAX_LEAVES = 50_000
+
+
+def _render_hook_input(value: object) -> Optional[tuple[str, str]]:
+    """Render a tool input as `path: value` lines with string values left RAW.
+
+    The scanner used to read json.dumps(tool_input), where a tab inside a
+    command becomes the two characters `\t` and a quote becomes `\"`. Rules that
+    need whitespace or quotes then never matched, so `rm<TAB>-rf<TAB>~/` or
+    `python3 -c "...urllib..."` passed the live hook. Scanning the strings the
+    tool will actually execute closes that. Returns (multi-line rendering,
+    rendering with each value's newlines folded to spaces), or None when the
+    structure is too deep or large to walk, in which case the caller scans the
+    raw payload instead.
+    """
+    lines: list[str] = []
+    folded: list[str] = []
+
+    def emit(path: str, text: str) -> None:
+        if len(lines) >= HOOK_MAX_LEAVES:
+            raise OverflowError
+        lines.append(f"{path}: {text}")
+        folded.append(f"{path}: " + re.sub(r"\\?\r?\n", " ", text))
+
+    def walk(node: object, path: str) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                walk(child, f"{path}.{key}" if path else str(key))
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                walk(child, f"{path}[{index}]")
+        elif isinstance(node, str):
+            emit(path or "value", node)
+        else:
+            emit(path or "value", json.dumps(node))
+
+    try:
+        walk(value, "")
+    except (RecursionError, OverflowError):
+        return None
+    return "\n".join(lines), "\n".join(folded)
+
+
 def main_hook(argv: Optional[list[str]] = None) -> int:
     """Runtime filter for coding-agent hooks (Claude Code / Codex contract).
 
@@ -1345,20 +1498,29 @@ def main_hook(argv: Optional[list[str]] = None) -> int:
         )
     tool_name = "<stdin>"
     body = raw
+    flattened = ""
     try:
         parsed = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         parsed = None
     if isinstance(parsed, dict):
         tool_name = str(parsed.get("tool_name") or "<stdin>")
-        body = f"tool_name: {tool_name}\n" + json.dumps(
-            # ensure_ascii=False keeps invisible unicode visible to the scanner
-            parsed.get("tool_input", parsed), indent=1, ensure_ascii=False
-        )
+        rendered = _render_hook_input(parsed.get("tool_input", parsed))
+        if rendered is not None:
+            body = f"tool_name: {tool_name}\n" + rendered[0]
+            flattened = f"tool_name: {tool_name}\n" + rendered[1]
 
     # Hook payloads are always untrusted: suppression markers stay inert even
     # when the harness happens to run from cap's own checkout.
     report = audit_bytes(Path(f"<hook:{tool_name}>"), body.encode("utf-8"), allow_suppression=False)
+    if flattened and flattened != body:
+        # A second pass over each value with its newlines folded catches a
+        # pipeline split across lines (`cat .env |` newline `curl ...`). It only
+        # contributes rules the line-by-line pass did not already report.
+        seen_rules = {finding.rule_id for finding in report.findings}
+        extra = audit_bytes(Path(f"<hook:{tool_name}>"), flattened.encode("utf-8"), allow_suppression=False)
+        report.findings.extend(finding for finding in extra.findings if finding.rule_id not in seen_rules)
+        report.verdict = _worse_verdict(report.verdict, _verdict(report.findings))
     if input_oversized:
         report.findings.append(
             Finding(
