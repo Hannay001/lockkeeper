@@ -28,7 +28,7 @@ Smaller context window, better tool choices, and no unvetted skill instructions 
 
 AI coding agents get better with **skills** (`SKILL.md` files), **MCP servers**, plugins and tools. But every one you install adds to what the agent has to read and choose from. With hundreds installed, your context window fills up before work starts, and the agent often picks the wrong skill or none at all.
 
-**Lockkeeper is a local skill router.** It indexes everything installed across all your agents, and for each task it hands the agent a small, complementary set, typically 4 to 8 capabilities, with the exact file to read for each. Before anything reaches your agent, its built-in firewall can check skills and live tool calls for prompt injection.
+**Lockkeeper is a local skill router.** It indexes everything installed across all your agents, and for each task it hands the agent a small, complementary set, up to 10 capabilities by default ([you choose the size](https://github.com/Hannay001/lockkeeper/blob/main/docs/CONFIGURATION.md#bundle-size)), with the exact file to read for each. Before anything reaches your agent, its built-in firewall can check skills and live tool calls for prompt injection.
 
 ```console
 $ lockkeeper route --runtime claude "migrate the auth module to the new token API"
@@ -145,7 +145,7 @@ Routing claims should be measurable. Lockkeeper is tested against **SkillRouter 
 |---|--:|--:|
 | Correct skill ranked first, 26,000 skills | 34.7% | **65.3%** |
 | Correct skill ranked first, 79,141 skills | 25.3% | **54.7%** |
-| Needed skills included in the routed set (79k) | 20.6% | **41.7%** |
+| Needed skills included in the routed set (79k) | 20.6% | **52.1%** |
 | Time to route a ~180-word task, 26k skills | 6.5 s | **0.7 s** |
 
 On the full pool, Lockkeeper's standard-library ranker scores between the paper's general-purpose embedding models (Qwen3-Embedding-0.6B at 53.3%, Gemini embedding at 56.0%) and roughly double its BM25 keyword baseline (28.0%), without loading a model. Methods, per-change results and caveats: **[docs/BENCHMARK.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/BENCHMARK.md)**.
@@ -157,7 +157,7 @@ python3 scripts/bench_routing.py prepare --home /tmp/lk-bench --size 26000
 python3 scripts/bench_routing.py run --home /tmp/lk-bench
 ```
 
-**Your prompt stays flat as your library grows.** On a machine with 58,018 installed capabilities (about 77.5M tokens of skill text), six everyday tasks each routed to 4–6 capabilities, a median of about 8,700 tokens, over 99.98% kept out of context. A 10× smaller library gave essentially the same prompt size. Reproduce with `python3 scripts/bench_context_savings.py`.
+**Your prompt stays flat as your library grows.** On the 79,141-skill benchmark pool (about 157M tokens of skill text), six everyday tasks each routed to 10 capabilities: a median of about 16,000 tokens even if the agent reads every one, over 99.98% kept out of context. The 26,000-skill pool gave about the same (17,600). Reproduce with `python3 scripts/bench_context_savings.py`.
 
 ## How it works
 
@@ -165,14 +165,14 @@ python3 scripts/bench_routing.py run --home /tmp/lk-bench
 flowchart LR
     T["Your task or prompt"] --> S["Rank every installed capability<br/>names, descriptions, body keywords,<br/>rare words weighted higher"]
     S --> P["Apply your policy<br/>deny lists, required roles"]
-    P --> B["Build a small bundle<br/>one capability per role, hard cap"]
+    P --> B["Build a bundle<br/>roles first, then close matches,<br/>up to your size (10 by default)"]
     B --> F["Keep only what this<br/>agent can actually run"]
     F --> R["Routed set with<br/>exact files to read"]
 ```
 
 - **One index for every agent** on your machine, deduplicated, and refreshed automatically when you install, remove or update a skill.
 - **Reads what each skill is about**, not just its one-line description: the most distinctive words of every skill's body are indexed at rebuild.
-- **Bundles, not long lists.** A route fills complementary roles (primary method, context, integration, verification, support) under a hard cap.
+- **Bundles, not long lists.** A route fills complementary roles (primary method, context, integration, verification, support), then tops up with close matches only, never past your bundle size (10 by default, 3 to 20).
 - **Optional upgrades, never required:** an embedding sidecar for semantic re-ranking, and a decision-model stage (for example [Laya](https://pypi.org/project/laya/) or a cross-encoder) that starts in shadow mode so you can measure it before trusting it.
 
 ## Prompt-injection firewall for skills and MCP

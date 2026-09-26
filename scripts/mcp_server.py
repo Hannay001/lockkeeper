@@ -47,7 +47,7 @@ TOOLS: list[dict[str, Any]] = [
         "title": "Route a task to the right capabilities",
         "description": (
             "Pick the few installed skills, MCP servers, plugins, tools, agents and commands that fit a "
-            "task, before starting it. Returns a small bundle (default 8) grouped by role (primary, "
+            "task, before starting it. Returns a bounded bundle (10 by default) grouped by role (primary, "
             "context, integration, execution, verification, support), each with why it was chosen and "
             "how to use it: for skills, the exact SKILL.md path to read. Use this instead of scanning "
             "skill lists; it keeps the context small."
@@ -61,7 +61,12 @@ TOOLS: list[dict[str, Any]] = [
                     "enum": RUNTIMES,
                     "description": "The agent that will use the bundle (defaults to the server's --runtime).",
                 },
-                "max": {"type": "integer", "minimum": 3, "maximum": 12, "description": "Bundle size (default 8)."},
+                "max": {
+                    "type": "integer",
+                    "minimum": 3,
+                    "maximum": 20,
+                    "description": "Bundle size (default: the configured bundle_size, 10 unless changed).",
+                },
             },
             "required": ["task"],
             "additionalProperties": False,
@@ -152,7 +157,7 @@ class LockkeeperTools:
         if not query:
             raise ToolError("task must contain at least one word")
         runtime = self._runtime(arguments)
-        max_count = self._integer(arguments, "max", 8, 3, 12)
+        max_count = self._integer(arguments, "max", registry.configured_bundle_size(), *registry.BUNDLE_SIZE_RANGE)
         result = registry.route_with_decision(
             self.records(),
             query,

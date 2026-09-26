@@ -27,7 +27,7 @@ writes the skills as real skill folders into an isolated home directory, runs
 | Hit@1 | The top-ranked capability is a correct skill. |
 | MRR | Mean of 1/rank of the first correct skill, over the full ranking. |
 | Recall@K | Share of a task's correct skills in the top K. |
-| Bundle recall / precision | Share of correct skills in the routed bundle (max 8), and share of the bundle that is correct: what the agent actually receives. |
+| Bundle recall / precision | Share of correct skills in the routed bundle (default size, up to 10), and share of the bundle that is correct: what the agent actually receives. |
 
 ## Results
 
@@ -43,10 +43,11 @@ Before = the router at the start of this work; after = this release. Measured on
 | nDCG@10 | 0.244 | **0.514** |
 | Recall@10 | 0.276 | **0.532** |
 | Recall@50 | 0.359 | **0.611** |
-| Bundle recall | 0.206 | **0.417** |
-| Bundle precision | 0.118 | **0.238** |
-| Bundle recall, one-skill tasks | 0.312 | **0.688** |
-| Bundle recall, multi-skill tasks | 0.177 | **0.343** |
+| Bundle recall | 0.206 | **0.521** |
+| Bundle precision | 0.118 | **0.162** |
+| Bundle recall, one-skill tasks | 0.312 | **0.750** |
+| Bundle recall, multi-skill tasks | 0.177 | **0.460** |
+| Capabilities per bundle (mean) | ~4.5 | **9.1** |
 | Route, median / p95 (warm, in-process) | 19.9 s / 33.4 s | **2.5 s / 4.7 s** |
 | Rebuild | 42 s | 100 s |
 
@@ -59,8 +60,9 @@ Before = the router at the start of this work; after = this release. Measured on
 | nDCG@10 | 0.310 | **0.563** |
 | Recall@10 | 0.332 | **0.586** |
 | Recall@50 | 0.443 | **0.657** |
-| Bundle recall | 0.220 | **0.447** |
-| Bundle precision | 0.132 | **0.254** |
+| Bundle recall | 0.220 | **0.577** |
+| Bundle precision | 0.132 | **0.179** |
+| Capabilities per bundle (mean) | ~4.5 | **9.0** |
 | Route, median / p95 (warm, in-process) | 6.5 s / 11.1 s | **0.69 s / 1.3 s** |
 | Rebuild | 14 s | 29 s |
 
@@ -74,11 +76,36 @@ Before = the router at the start of this work; after = this release. Measured on
 | Plural forms match (`structures` ↔ `structure`); umlaut words match at all | 0.387 | 0.424 | 0.318 |
 | Rare terms weigh more (graded IDF) | 0.440 | 0.465 | 0.332 |
 | Breadth of match counts linearly, not quadratically | 0.507 | 0.491 | 0.366 |
-| Body keywords: each skill's 24 most distinctive body words (tf-idf) | **0.653** | **0.586** | **0.447** |
+| Body keywords: each skill's 24 most distinctive body words (tf-idf) | **0.653** | **0.586** | 0.447 |
+| Bundles fill to the default size of 10 with close matches (below) | **0.653** | **0.586** | **0.577** |
 
 Speed came from indexing lexical ranking so a long task only touches the records it
 can match, and routing long prompts instead of refusing them (they used to fail above
 64 words).
+
+### Bundle size
+
+Routes used to stop adding extra matches once a bundle held four capabilities, so
+bundles averaged about 4.5 whatever the cap. Now they fill toward the bundle size (10
+by default, [configurable](CONFIGURATION.md#bundle-size)) with candidates scoring at
+least half as well as the best match. The cutoff was picked from this sweep (26k
+skills, size 10):
+
+| Extra matches allowed | Capabilities per bundle | Bundle recall | Bundle precision | One-skill tasks | Multi-skill tasks |
+|---|--:|--:|--:|--:|--:|
+| Old behavior (stop at 4) | 4.5 | 0.447 | 0.254 | 0.750 | 0.364 |
+| Any score | 10.0 | 0.580 | 0.151 | 0.812 | 0.517 |
+| ≥ 45% of the best match | 9.3 | 0.580 | 0.170 | 0.812 | 0.517 |
+| **≥ 50% of the best match (default)** | **9.0** | **0.577** | **0.179** | **0.812** | **0.513** |
+| ≥ 55% of the best match | 8.6 | 0.573 | 0.188 | 0.812 | 0.508 |
+| ≥ 60% of the best match | 8.1 | 0.559 | 0.209 | 0.812 | 0.491 |
+
+On 79k skills the default gives 0.521 bundle recall (was 0.417) with 9.1 capabilities
+per bundle. Ranking (Hit@1, MRR, Recall@K) and speed don't change.
+
+The cost is context: an agent that reads every routed skill reads about twice as much
+skill text (a median of ~16,000 tokens on the 79k pool for six everyday tasks, against
+~157M for the whole pool). Set a smaller size if that matters more than coverage.
 
 ## Compared with the SkillRouter paper
 

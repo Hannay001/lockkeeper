@@ -13,7 +13,7 @@ and stays fast at tens of thousands of skills.
 - **Much better skill choices.** On the public SkillRouter benchmark (75 real agent
   tasks), a correct skill is ranked first 65.3% of the time among 26,000 skills (was
   34.7%) and 54.7% among 79,141 (was 25.3%), with no model. The set an agent receives
-  contains twice as many of the skills it needs. See [docs/BENCHMARK.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/BENCHMARK.md).
+  now carries 52% of the skills a task needs (was 21%). See [docs/BENCHMARK.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/BENCHMARK.md).
 - **Route every prompt automatically.** `lockkeeper hooks install claude` adds a
   Claude Code hook that gives each prompt the installed skills that fit it, with the
   exact files to read.
@@ -30,6 +30,10 @@ and stays fast at tens of thousands of skills.
   skips slash commands and short replies, and never waits on a re-index.
 - `lockkeeper mcp [--runtime ...]`: MCP stdio server (protocol 2025-06-18, 2025-03-26,
   2024-11-05).
+- Bundle size setting: a route returns up to 10 capabilities by default. Choose 3 to 20
+  per call (`--max`, or `max` in the MCP `route` tool), with `LOCKKEEPER_BUNDLE_SIZE`,
+  or with `bundle_size` in a config file. Changing it never triggers a re-index. See
+  [configuration](https://github.com/Hannay001/lockkeeper/blob/main/docs/CONFIGURATION.md#bundle-size).
 - `lockkeeper telemetry on|off|status|show|flush`: opt-in, anonymous daily usage
   counts. Off by default; `DO_NOT_TRACK` and CI always turn it off; no endpoint is
   configured yet. See [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
@@ -52,6 +56,9 @@ and stays fast at tens of thousands of skills.
   counts linearly, so generic skills no longer win long tasks.
 - Prompts are read the way agents write them: dotted filenames (`packets.pcap` finds
   `pcap`), plural forms, sentence punctuation, and English function words.
+- Bundles fill toward the bundle size with close matches (at least half the best
+  match's score) instead of stopping at four. Needed skills delivered rose from 44.7%
+  to 57.7% on 26k skills and from 41.7% to 52.1% on 79k.
 - Ranking is indexed, so a query only touches the skills it can match.
 - The registry notices installed, removed, moved or updated skills, agents, commands
   and plugins on every query and repairs itself, ignoring harness session noise.
@@ -75,6 +82,10 @@ and stays fast at tens of thousands of skills.
   first query after upgrading.
 - Re-indexing reads skill bodies, so it takes longer on very large libraries (79k
   skills: 42 s to 100 s). Typical libraries still take seconds.
+- Routes return up to 10 capabilities by default (typically 4 to 8 before), and the
+  Claude Code hook uses the same size (it used 6). An agent that reads every routed
+  skill reads about twice as much skill text. For leaner bundles, set
+  `bundle_size = 6` or `LOCKKEEPER_BUNDLE_SIZE=6`.
 - `search --json` results no longer include the internal `keywords` field.
 - With a decision provider in `rerank` mode, the provider now only reorders its
   shortlist, using scores normalized across that shortlist.

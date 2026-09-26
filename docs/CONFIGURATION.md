@@ -8,7 +8,7 @@ control.
 | Command | What it does |
 |---|---|
 | `lockkeeper rebuild` | Index every capability installed across your agents. |
-| `lockkeeper route "<task>"` | Pick a small, complementary set of capabilities for a task. |
+| `lockkeeper route "<task>"` | Pick a small, complementary set of capabilities for a task (up to 10 by default). |
 | `lockkeeper search "<keywords>"` | Rank capabilities by keywords. |
 | `lockkeeper audit <path>` | Scan a skill, plugin or config for prompt injection ([details](FIREWALL.md)). |
 | `lockkeeper hooks install claude` | Route every Claude Code prompt automatically. |
@@ -21,6 +21,27 @@ control.
 Add `--json` to `route`, `search` and `audit` for machine-readable output, and
 `--runtime claude|codex|hermes|jcode|shared` to route from a specific agent's point of
 view.
+
+## Bundle size
+
+A route returns up to **10** capabilities by default. The roles are filled first
+(primary methods, context, integrations, execution, verification). The remaining
+slots go to the next-best matches, but only while they score at least half as well as
+the best match, so a narrow task still gets a short list.
+
+Pick any size from 3 to 20. The first of these that is set wins:
+
+| Where | Example | Applies to |
+|---|---|---|
+| `--max` on `route` or `route-hook`, or `max` in the MCP `route` tool | `lockkeeper route --max 6 "fix the login bug"` | that call |
+| `LOCKKEEPER_BUNDLE_SIZE` environment variable | `export LOCKKEEPER_BUNDLE_SIZE=12` | your shell, or an MCP server's `env` block |
+| `bundle_size` in a config file | `bundle_size = 12` in `config/local.toml`, `config/<project>.toml`, or the file named by `CAPABILITY_ROUTER_CONFIG` | every route on this machine, or in that project |
+
+Smaller bundles use less context. Larger ones carry more of what a multi-step task
+needs: on the public benchmark, going from the old behavior (about 4.5 capabilities
+per route) to the default of up to 10 raised the share of needed skills delivered from
+44.7% to 57.7% on 26,000 skills ([details](BENCHMARK.md#bundle-size)). Changing the
+size never triggers a re-index.
 
 ## Projects and policy packs
 

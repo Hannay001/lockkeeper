@@ -104,7 +104,7 @@ def route_seconds(records: list[dict], query: str, output: Path) -> float:
     registry._LEXICAL_INDEXES.clear()
     registry._SEMANTIC_CACHE.clear()
     started = time.perf_counter()
-    registry.bundle(records, query, "claude", "", 8, output)
+    registry.bundle(records, query, "claude", "", registry.DEFAULT_BUNDLE_SIZE, output)
     return time.perf_counter() - started
 
 
