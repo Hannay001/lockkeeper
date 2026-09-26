@@ -306,8 +306,17 @@ def run(args: argparse.Namespace) -> int:
     def ids_of(pairs: list[tuple[float, dict[str, Any]]]) -> list[Optional[str]]:
         return [skill_of(record) for _score, record in pairs]
 
+    reusable: dict[str, dict[str, Any]] = {}
+    if args.resume and args.json and args.json.is_file():
+        # Keep tasks that completed without a provider error; re-run the rest.
+        previous = json.loads(args.json.read_text(encoding="utf-8"))
+        reusable = {row["task_id"]: row for row in previous["rows"] if not row.get("provider_error")}
+
     rows: list[dict[str, Any]] = []
     for index, label in enumerate(labels, start=1):
+        if label["task_id"] in reusable:
+            rows.append(reusable[label["task_id"]])
+            continue
         query = label["query"]
         began = time.perf_counter()
         ranked = registry.ranked_records(records, query, args.runtime, output)
@@ -484,6 +493,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="skip the provider-free bundle (its ranking metrics are still reported)",
     )
     go.add_argument("--json", type=Path, help="write the full report here")
+    go.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse tasks from an existing --json report that finished without a provider error",
+    )
     go.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     return prepare(args) if args.command == "prepare" else run(args)
