@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import json
 import re
 import sys
 import tempfile
@@ -123,6 +126,50 @@ class WordFormTest(unittest.TestCase):
         self.assertIn("pcap", terms)
         self.assertIn("py", terms)
         self.assertNotIn("solution.py.", terms)
+
+
+class BodyKeywordTest(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory(prefix="lockkeeper-body-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def write_skill(self, name: str, body: str) -> dict:
+        path = self.root / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\nname: {name}\ndescription: Materials helper\n---\n\n{body}\n", encoding="utf-8")
+        return {**skill(name, "Materials helper"), "source_path": str(path)}
+
+    def test_keywords_are_the_words_a_body_is_about(self) -> None:
+        crystal = self.write_skill(
+            "crystal", "Use pymatgen to read POSCAR files. pymatgen parses POSCAR and VASP output for the user."
+        )
+        others = [self.write_skill(f"other-{index}", "Read files and parse output for the user.") for index in range(5)]
+        mcp_row = mcp("github", "GitHub pull requests")
+        records = [crystal, *others, mcp_row]
+        registry.assign_body_keywords(records)
+        words = crystal["keywords"].split()
+        self.assertEqual(set(words[:2]), {"pymatgen", "poscar"}, "repeated distinctive words rank first")
+        self.assertIn("vasp", words)
+        self.assertNotIn("the", words)
+        self.assertEqual(mcp_row["keywords"], "", "only markdown capabilities have bodies")
+
+    def test_a_word_only_the_body_mentions_routes_to_the_skill(self) -> None:
+        crystal = self.write_skill("crystal", "Compute Wyckoff positions from CIF files with pymatgen.")
+        plain = self.write_skill("plain", "Summarize a document.")
+        registry.assign_body_keywords([crystal, plain])
+        self.assertGreater(registry.search_score(crystal, "wyckoff positions", "claude"), 0.0)
+        self.assertEqual(registry.search_score(plain, "wyckoff positions", "claude"), 0.0)
+
+    def test_search_output_leaves_keywords_out(self) -> None:
+        crystal = self.write_skill("crystal", "Compute Wyckoff positions with pymatgen.")
+        registry.assign_body_keywords([crystal])
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            registry.emit_search([crystal], "wyckoff", "claude", 5, True, self.root / "out", verify_sources=False)
+        results = json.loads(buffer.getvalue())["results"]
+        self.assertEqual(results[0]["name"], "crystal")
+        self.assertNotIn("keywords", results[0])
 
 
 class LongQueryTest(unittest.TestCase):

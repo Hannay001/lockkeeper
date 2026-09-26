@@ -18,6 +18,7 @@ except ImportError:  # Windows: no fcntl; best-effort exclusive lock via msvcrt
 
 
 import hashlib
+import heapq
 import io
 import json
 import math
@@ -43,6 +44,7 @@ from typing import Any, Iterable, Iterator, Optional, Union
 
 from router_config import RouterConfig, RouterConfigError, load_router_config, split_project_argument
 import decision_provider
+import telemetry
 
 
 ROUTER_CONFIG: RouterConfig
@@ -650,6 +652,8 @@ SOFT_TERM_WEIGHT = 0.25
 # discrimination; damp it rather than let it dominate (classic IDF, cheaply applied).
 IDF_DAMP_RATIO = 0.05
 IDF_DAMP_FACTOR = 0.3
+# Points for a query term found among a capability's body keywords (see search_score).
+BODY_KEYWORD_POINTS = 4
 # Points per matched query term (see search_score).
 MATCH_BREADTH_POINTS = 8
 
@@ -2626,6 +2630,7 @@ def collect_registry(output: Path) -> tuple[list[dict[str, Any]], list[dict[str,
     registration_counts = Counter(row["capability_id"] for row in registrations)
     for record in records:
         record["registration_count"] = registration_counts[record["id"]]
+    assign_body_keywords(records)
     return records, registrations, legacy
 
 
@@ -2907,7 +2912,8 @@ CLAUDE_SETTINGS_CAPABILITY_KEYS = (
 CODEX_CONFIG_CAPABILITY_KEYS = ("mcp_servers", "plugins")
 # Bump whenever the input fingerprint changes shape, so an upgraded router
 # repairs old manifests with a plain rebuild instead of a harness snapshot.
-INPUT_FINGERPRINT_VERSION = 2
+# 3: registry rows carry body keywords; older registries rebuild themselves once.
+INPUT_FINGERPRINT_VERSION = 3
 
 
 def _has_value(value: Any) -> bool:
@@ -3246,6 +3252,72 @@ def _rebuild_locked(output: Path, quiet: bool) -> dict[str, Any]:
     return manifest
 
 
+# Body keywords: the words a capability's markdown body is most ABOUT, relative to
+# every other body in the registry. Names and descriptions are short; the body is
+# where a skill says which libraries, formats and domains it covers ("pymatgen:
+# vasp, poscar, spacegroupanalyzer"). Routing on them lifted benchmark Hit@1 from
+# 0.51 to 0.63 (SkillRouter Eval Core, 26k skills). Their SkillRouter paper found
+# hiding the body costs dense routers 37-44 points; this recovers much of that
+# with no model.
+BODY_KEYWORD_TYPES = frozenset({"skill", "agent", "command"})
+BODY_KEYWORD_LIMIT = 24
+BODY_KEYWORD_READ_CHARS = 65_536
+# Words of three or more characters: "pymatgen", "c++", "spacegroupanalyzer", "poscar".
+_BODY_TOKEN_RE = re.compile(r"[a-z][a-z0-9+#]{2,}(?:[.-][a-z0-9+#]+)*")
+
+
+def markdown_body(path: Path) -> str:
+    """The lowercased, umlaut-folded body of a markdown file, frontmatter removed."""
+    text = read_prefix(path, BODY_KEYWORD_READ_CHARS * 2)
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4 :]
+    return fold_umlauts(text[:BODY_KEYWORD_READ_CHARS].lower())
+
+
+def assign_body_keywords(records: list[dict[str, Any]]) -> None:
+    """Set record["keywords"] on every row: its body's top tf-idf words, or "".
+
+    Each body is read and tokenized once. Until the document frequencies are known,
+    a record keeps its words as two compact strings -- the words it uses once, and
+    "word count" pairs for the rest -- because a dict per record multiplied memory
+    on large registries. Most words occur once in a body, so for those the best are
+    simply the rarest, found with one top-N pass; only repeated words are scored.
+    """
+    ignored = SYNTAX_STOPWORDS | SOFT_QUERY_TERMS
+    document_frequency: Counter[str] = Counter()
+    packed: dict[int, tuple[str, str]] = {}
+    for position, record in enumerate(records):
+        record["keywords"] = ""
+        source = record.get("source_path") or ""
+        if record["type"] not in BODY_KEYWORD_TYPES or not source.endswith(".md"):
+            continue
+        counts = Counter(_BODY_TOKEN_RE.findall(markdown_body(Path(source))))
+        for word in ignored.intersection(counts):
+            del counts[word]
+        if not counts:
+            continue
+        document_frequency.update(counts.keys())
+        once = [word for word, count in counts.items() if count == 1]
+        repeated = " ".join(f"{word} {count}" for word, count in counts.items() if count > 1)
+        packed[position] = (" ".join(once), repeated)
+    documents = len(packed)
+    if not documents:
+        return
+    idf = {word: math.log((documents + 1) / (frequency + 1)) for word, frequency in document_frequency.items()}
+    del document_frequency
+    for position in list(packed):
+        once_text, repeated_text = packed.pop(position)
+        scored = [(idf[word], word) for word in heapq.nlargest(BODY_KEYWORD_LIMIT, once_text.split(), key=idf.__getitem__)]
+        parts = repeated_text.split()
+        scored.extend(
+            ((1 + math.log(int(count))) * idf[word], word) for word, count in zip(parts[::2], parts[1::2])
+        )
+        scored.sort(key=lambda pair: (-pair[0], pair[1]))
+        records[position]["keywords"] = " ".join(word for _score, word in scored[:BODY_KEYWORD_LIMIT])
+
+
 SOURCE_TRUST_TYPES = frozenset({"skill", "agent", "command", "entrypoint"})
 KNOWN_CAPABILITY_TYPES = {
     "skill", "plugin", "mcp", "tool", "toolset", "agent", "command", "entrypoint", "corpus",
@@ -3319,6 +3391,8 @@ def load_registry(output: Path, *, verify_sources: bool = True) -> list[dict[str
             raise RuntimeError(
                 f"Invalid registry record at line {line_number}: fields {', '.join(invalid_fields)}"
             )
+        if not isinstance(row.get("keywords", ""), str):
+            raise RuntimeError(f"Invalid registry record at line {line_number}: fields keywords")
         if row["type"] not in KNOWN_CAPABILITY_TYPES:
             raise RuntimeError(f"Invalid registry capability type at line {line_number}: {row['type']}")
         if row["category"] not in CATEGORY_BY_SLUG:
@@ -3759,6 +3833,9 @@ def search_score(
     folded_category = fold_umlauts(category)
     folded_source = fold_umlauts(source)
     folded_alias = fold_umlauts(alias_text)
+    # Distinctive words from the capability's own body (markdown_body_keywords), stored
+    # lowercased and folded at rebuild. Absent on rows built by an older router.
+    folded_keywords = record.get("keywords") or ""
     score = 80.0 if name == normalized_query else 0.0
     direct_matches = 0
     base_matches = 0
@@ -3795,6 +3872,7 @@ def search_score(
             and head not in folded_description
             and head not in folded_source
             and head not in folded_category
+            and head not in folded_keywords
         ):
             continue
         matched = False
@@ -3809,6 +3887,12 @@ def search_score(
             matched = True
         if matches(folded_source) is not None:
             score += 2 * weight
+            matched = True
+        if folded_keywords and matches(folded_keywords) is not None:
+            # A word the body is ABOUT ("vasp", "pcap", "hexagonal"): weaker than the
+            # description (7), stronger than the path (2). Names and descriptions are
+            # short; a task often names the library or format only the body mentions.
+            score += BODY_KEYWORD_POINTS * weight
             matched = True
         if matches(folded_category) is not None:
             score += 3 * weight
@@ -4260,7 +4344,7 @@ _LEXICAL_INDEX_CACHE_SIZE = 4
 # query_terms() splits on everything outside this class, so a query term is a run of
 # these characters and every occurrence of it lies inside one maximal run of them.
 _TOKEN_RE = re.compile(r"[a-z0-9+#.-]+")
-_INDEX_FIELDS = itemgetter("name", "description", "source_path", "category")
+_INDEX_FIELDS = itemgetter("name", "description", "source_path", "category", "keywords")
 
 
 class _TokenPostings:
@@ -4356,13 +4440,14 @@ class _LexicalIndex:
     route ranks the task and then each of its intents against the same pool.
     """
 
-    def __init__(self, signature: list[tuple[str, str, str, str]]) -> None:
+    def __init__(self, signature: list[tuple[str, str, str, str, str]]) -> None:
         self.signature = signature
         # Exactly the lowercased "name description" blobs damped_query_terms() counts.
         self.name_description = _TokenPostings()
-        # Source paths, plus folded names/descriptions where folding changes them.
+        # Source paths and body keywords, plus folded names/descriptions where folding
+        # changes them.
         self.other = _TokenPostings()
-        for position, (name, description, source_path, _category) in enumerate(signature):
+        for position, (name, description, source_path, _category, keywords) in enumerate(signature):
             name_description = f"{name} {description}".lower()
             self.name_description.add(position, name_description)
             other = source_path.lower()
@@ -4370,6 +4455,8 @@ class _LexicalIndex:
                 other = "\n".join(
                     (other, fold_umlauts(other), fold_umlauts(name.lower()), fold_umlauts(description.lower()))
                 )
+            if keywords:
+                other = f"{other}\n{keywords}"
             self.other.add(position, other)
         self.name_description.freeze()
         self.other.freeze()
@@ -4430,9 +4517,15 @@ def _lexical_index(pool: list[dict[str, Any]]) -> _LexicalIndex:
         signature = list(map(_INDEX_FIELDS, pool))
     except KeyError:
         # damped_query_terms() only reads name and description, and accepts rows that
-        # carry nothing else.
+        # carry nothing else; rows built by an older router carry no keywords.
         signature = [
-            (record["name"], record["description"], record.get("source_path", ""), record.get("category", ""))
+            (
+                record["name"],
+                record["description"],
+                record.get("source_path", ""),
+                record.get("category", ""),
+                record.get("keywords") or "",
+            )
             for record in pool
         ]
     for position, index in enumerate(_LEXICAL_INDEXES):
@@ -4792,7 +4885,9 @@ def emit_search(
                             "score": round(score, 1),
                             "provenance": provenance,
                             "scrutinise": scrutinise,
-                            **record,
+                            # Body keywords are a ranking signal, not something an agent
+                            # needs to read: keep them out of the context.
+                            **{key: value for key, value in record.items() if key != "keywords"},
                             **(
                                 {"resources": trusted_resources(record, verify_sources)}
                                 if "resources" in record
@@ -6584,6 +6679,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Bind even when a requested runtime is absent"
     )
     subparsers.add_parser("doctor", help="Show detected harnesses and routing health")
+    mcp_parser = subparsers.add_parser(
+        "mcp", help="Serve route, search and audit to any MCP client (stdio), with the registry kept warm"
+    )
+    mcp_parser.add_argument(
+        "--runtime", choices=["codex", "claude", "hermes", "jcode", "shared"], default="claude",
+        help="Default runtime for route and search",
+    )
+    subparsers.add_parser("telemetry", help="Opt-in anonymous usage counts: status, on, off, show, flush")
+    subparsers.add_parser(
+        "route-hook", help="UserPromptSubmit hook: add the capabilities that fit each prompt as context"
+    )
+    subparsers.add_parser(
+        "hooks", help="Wire Lockkeeper into Claude Code: `lockkeeper hooks install claude [--firewall]`"
+    )
     return parser
 
 
@@ -6683,6 +6792,51 @@ def _run_standalone(command: str, argv: list[str]) -> int:
 
 
 def main() -> int:
+    """The `lockkeeper` CLI; records opt-in, anonymous usage counts (telemetry.py)."""
+    try:
+        _, pre_argv = split_project_argument(sys.argv[1:])
+    except (RouterConfigError, RuntimeError, ValueError):
+        pre_argv = sys.argv[1:]
+    first_command = next((token for token in pre_argv if not token.startswith("-")), None)
+    if first_command == "telemetry":
+        position = pre_argv.index("telemetry")
+        return telemetry.cli(pre_argv[position + 1 :])
+    if first_command == "hooks":
+        import route_hook
+
+        position = pre_argv.index("hooks")
+        return route_hook.setup_cli(pre_argv[position + 1 :])
+    if first_command == "route-hook":
+        position = pre_argv.index("route-hook")
+        with telemetry.timed(["route-hook"]):
+            return _route_hook(pre_argv[position + 1 :])
+    with telemetry.timed(pre_argv) as run:
+        code = _main()
+        run.failed = code != 0
+        if telemetry.enabled():
+            counts = load_json(ROUTER_CONFIG.output_dir / "manifest.json").get("counts")
+            if isinstance(counts, dict) and isinstance(counts.get("capabilities"), int):
+                run.capabilities = counts["capabilities"]
+        return code
+
+
+def _route_hook(argv: list[str]) -> int:
+    """UserPromptSubmit hook (route_hook.py). A broken config adds no context; it never
+    turns every prompt into an error."""
+    try:
+        selected_project, _ = split_project_argument(sys.argv[1:])
+        configure_router(
+            load_router_config(project_name=selected_project, script_path=Path(__file__)),
+            verified_startup=True,
+        )
+    except (RouterConfigError, RuntimeError, OSError, ValueError):
+        return 0
+    import route_hook
+
+    return route_hook.run(argv, ROUTER_CONFIG.output_dir, selected_project or "")
+
+
+def _main() -> int:
     # Standalone commands must not depend on harness/router config health.
     _, pre_argv = split_project_argument(sys.argv[1:])
     first_command = next((tok for tok in pre_argv if not tok.startswith("-")), None)
@@ -6806,6 +6960,10 @@ def main() -> int:
             from cap_setup import main as setup_main
 
             return setup_main(["doctor"])
+        elif args.command == "mcp":
+            import mcp_server
+
+            return mcp_server.main(["--runtime", args.runtime], project=args.project or "")
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
         if getattr(args, "json", False):

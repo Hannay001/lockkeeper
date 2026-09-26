@@ -1,264 +1,254 @@
-# Lockkeeper 🔒
+<div align="center">
 
+# Lockkeeper
+
+### The skill router and prompt-injection firewall for AI coding agents
+
+Give **Claude Code, Codex, Cursor** and other AI agents the few skills, MCP servers and tools that fit each task, instead of all of them.<br>
+Smaller context window, better tool choices, and no unvetted skill instructions reaching your agent.
+
+[![tests](https://github.com/Hannay001/lockkeeper/actions/workflows/tests.yml/badge.svg)](https://github.com/Hannay001/lockkeeper/actions/workflows/tests.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#development)
+![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
+![macOS, Linux, Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)
+[![MIT license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**The capability router and prompt-injection firewall for AI coding agents.**
+[Quickstart](#quickstart) · [Ways to use it](#four-ways-to-use-lockkeeper) · [Benchmark](#proven-on-a-public-benchmark) · [Firewall](#prompt-injection-firewall-for-skills-and-mcp) · [FAQ](#faq) · [Docs](#documentation)
 
-Lockkeeper indexes every skill, MCP server, plugin, tool, agent, and command installed across your coding agents (Claude Code, Codex, Cursor, Jcode, Hermes, OpenCode, Gemini, Copilot, Windsurf, Cline). It routes any task to a bounded portfolio of the right capabilities and screens everything that crosses your agent's boundary with a built-in injection firewall.
+</div>
 
-> Your agent doesn't need all your installed capabilities in context.
-> It needs the right 8, verified safe, for *this* task.
+---
 
-**Built and maintained by [Himanshu (@Hannay001)](https://github.com/Hannay001).** Contributions welcome. If Lockkeeper saves you context, a ⭐ helps other people find it.
+## What is Lockkeeper?
 
-<p align="center">
-  <img src="docs/demo-route.png" alt="lockkeeper bundle routing a payment-webhook audit task to two primary skills, flagged as untrusted external content" width="72%">
-  <br><sub><b>1 · Route</b> — one query, a bounded portfolio instead of the whole toolbox</sub>
-</p>
-<p align="center">
-  <img src="docs/demo-audit.png" alt="lockkeeper audit flagging a skill as hostile for instruction override and a curl piped to sh exfiltration attempt" width="72%">
-  <br><sub><b>2 · Catch</b> — the firewall flags an injection attack; exit codes gate installs and CI</sub>
-</p>
-<p align="center">
-  <img src="docs/demo-receipt.png" alt="signed scan receipt verified intact with exit code zero" width="72%">
-  <br><sub><b>3 · Prove</b> — HMAC-signed receipts show evidence wasn't altered after the scan</sub>
-</p>
+AI coding agents get better with **skills** (`SKILL.md` files), **MCP servers**, plugins and tools. But every one you install adds to what the agent has to read and choose from. With hundreds installed, your context window fills up before work starts, and the agent often picks the wrong skill or none at all.
+
+**Lockkeeper is a local skill router.** It indexes everything installed across all your agents, and for each task it hands the agent a small, complementary set, typically 4 to 8 capabilities, with the exact file to read for each. Before anything reaches your agent, its built-in firewall can check skills and live tool calls for prompt injection.
 
 ```console
-$ lockkeeper route --runtime claude --stdin <<'TASK'
-migrate the auth module to the new token API
-TASK
+$ lockkeeper route --runtime claude "migrate the auth module to the new token API"
 
-status: success
-summary: selected 6 complementary capabilities across 4 lanes
-[context] mcp: context7
 [primary] skill: api-migration
+[context] mcp: context7
 [integration] tool: mcp__context7__query_docs
-[execution] tool: exec_command
 [verification] agent: code-reviewer
 [support] skill: python-patterns
 context savings: loaded 6 of 7,540 eligible capabilities (7,534 kept out of context)
 ```
 
-Every route ends with that `context savings` line so the value is visible, not just claimed.
+<p align="center">
+  <img src="docs/demo-route.png" alt="Lockkeeper routing a payment-webhook audit task to two primary skills in the terminal" width="72%">
+</p>
 
-Exact entries depend on what you have installed. What `lockkeeper` guarantees is the structure: complementary lanes, a hard cap on portfolio size, and every entry filtered to what that runtime can actually execute. Add `--savings` to also estimate the skill-body tokens kept out of your prompt, and see [Proof: your prompt stays flat as your toolbox grows](#proof-your-prompt-stays-flat-as-your-toolbox-grows) for real, reproducible numbers.
+## Why developers use Lockkeeper
+
+- **🎯 Better skill choices.** On a public benchmark of real agent tasks, Lockkeeper ranks a correct skill first **65% of the time among 26,000 real skills** (up from 35%) and **55% among 79,000**, no model required. [See the benchmark](#proven-on-a-public-benchmark).
+- **📉 A context window that stays small.** With 58,018 capabilities in the library, a routed task still carries a median of about **8,700 tokens** of skills instead of about 77.5 million. Adding skills to the library doesn't grow your prompt.
+- **🛡 Safer skills and plugins.** Scan any skill, plugin or MCP config for hidden instructions and data exfiltration before your agent reads it, and block hostile tool calls live.
+- **🔌 Works where you already work.** Automatic routing in Claude Code, an MCP server for Codex, Cursor, Windsurf, Cline and other clients, and a CLI for everything else.
+- **🔒 Local, private and dependency-free.** Pure Python standard library. No GPU, API key or cloud service needed. Telemetry is off unless you opt in.
+
+## Quickstart
+
+**1. Install** (Python 3.11+):
+
+```sh
+git clone https://github.com/Hannay001/lockkeeper.git && cd lockkeeper
+./install.sh          # puts `lockkeeper` on your PATH and connects every agent it finds
+```
+
+<sub>Prefer not to use a terminal? Paste the prompt in [PROMPT.md](PROMPT.md) into the AI agent you already use; it installs and configures Lockkeeper for you. Or install with pip: `pip install git+https://github.com/Hannay001/lockkeeper.git`</sub>
+
+**2. Index what you have installed:**
+
+```sh
+lockkeeper rebuild
+lockkeeper doctor     # shows each agent found and how many skills it has
+```
+
+**3. Route a task:**
+
+```sh
+lockkeeper route "write unit tests for a python data pipeline"
+```
+
+Then pick how your agent should use it, below.
+
+## Four ways to use Lockkeeper
+
+### 1. Route every prompt automatically (Claude Code)
+
+```sh
+lockkeeper hooks install claude
+```
+
+Every prompt you send now reaches Claude Code with a short note naming the installed skills that fit it and the exact files to read. Slash commands and short replies like "thanks" pass through untouched, and the hook never blocks a prompt. Undo with `lockkeeper hooks remove claude`.
+
+### 2. As an MCP server (Codex, Cursor, Windsurf, Cline and any MCP client)
+
+`lockkeeper mcp` gives your agent three tools, `route`, `search` and `audit`, and keeps the index loaded between calls so answers are fast.
+
+```sh
+claude mcp add lockkeeper -- lockkeeper mcp          # Claude Code
+```
+
+```toml
+# Codex: ~/.codex/config.toml
+[mcp_servers.lockkeeper]
+command = "lockkeeper"
+args = ["mcp", "--runtime", "codex"]
+```
+
+```json
+{ "mcpServers": { "lockkeeper": { "command": "lockkeeper", "args": ["mcp"] } } }
+```
+
+<sub>The JSON form works for Cursor (`~/.cursor/mcp.json`), Windsurf, Cline and most other clients.</sub>
+
+### 3. From the command line and scripts
+
+```sh
+lockkeeper route --runtime codex "add rate limiting to a REST endpoint"
+lockkeeper search "pdf tables"
+lockkeeper route --json --stdin < task.txt      # whole prompts, machine-readable output
+```
+
+### 4. As a firewall for skills and plugins
+
+```sh
+lockkeeper audit ~/Downloads/some-skill --recursive --strict   # exit 2 = hostile
+lockkeeper hooks install claude --firewall                      # block hostile tool calls live
+```
+
+## Supported agents
+
+| Agent | Skills and tools indexed | How the agent gets its routes |
+|---|:-:|---|
+| Claude Code | ✓ | Automatically on every prompt (`hooks install claude`), or MCP |
+| OpenAI Codex CLI | ✓ | MCP (`lockkeeper mcp`) or CLI |
+| Cursor, Windsurf, Cline | ✓ | MCP |
+| GitHub Copilot, Gemini CLI, OpenCode | ✓ | MCP |
+| Jcode, Hermes | ✓ | MCP or CLI |
+
+Lockkeeper reads the formats you already use: `SKILL.md` Agent Skills, agents and commands in Markdown, plugin manifests, and MCP server configs. The installer also detects agent tools it doesn't know by name.
+
+## Proven on a public benchmark
+
+Routing claims should be measurable. Lockkeeper is tested against **SkillRouter Eval Core**, the public benchmark from the SkillRouter paper ([arXiv:2603.22455](https://arxiv.org/abs/2603.22455)): 75 real agent tasks with known correct skills, hidden among real `SKILL.md` files from public repositories, including 780 deliberately misleading look-alikes.
+
+| | Before this release | **Lockkeeper today** |
+|---|--:|--:|
+| Correct skill ranked first, 26,000 skills | 34.7% | **65.3%** |
+| Correct skill ranked first, 79,141 skills | 25.3% | **54.7%** |
+| Needed skills included in the routed set (79k) | 20.6% | **41.7%** |
+| Time to route a ~180-word task, 26k skills | 6.5 s | **0.7 s** |
+
+On the full pool, Lockkeeper's standard-library ranker scores between the paper's general-purpose embedding models (Qwen3-Embedding-0.6B at 53.3%, Gemini embedding at 56.0%) and roughly double its BM25 keyword baseline (28.0%), without loading a model. Methods, per-change results and caveats: **[docs/BENCHMARK.md](docs/BENCHMARK.md)**.
+
+Reproduce it yourself (downloads the ~400 MB dataset once):
+
+```sh
+python3 scripts/bench_routing.py prepare --home /tmp/lk-bench --size 26000
+python3 scripts/bench_routing.py run --home /tmp/lk-bench
+```
+
+**Your prompt stays flat as your library grows.** On a machine with 58,018 installed capabilities (about 77.5M tokens of skill text), six everyday tasks each routed to 4–6 capabilities, a median of about 8,700 tokens, over 99.98% kept out of context. A 10× smaller library gave essentially the same prompt size. Reproduce with `python3 scripts/bench_context_savings.py`.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    T["Task"] --> Q["Query builder<br/>(runtime perspective)"]
-    Q --> S["Lexical scoring<br/>over one shared index"]
-    S --> O["Semantic re-rank<br/>(optional sidecar)"]
-    O --> D["Decision provider<br/>(optional: Laya, Jev,<br/>cross-encoder)"]
-    D --> P["Policy pack<br/>deny lists + required lanes"]
-    P --> B["Bounded portfolio<br/>max N entries"]
-    B --> F["Runtime filter<br/>executable here only"]
-    F --> R["Routed bundle"]
+    T["Your task or prompt"] --> S["Rank every installed capability<br/>names, descriptions, body keywords,<br/>rare words weighted higher"]
+    S --> P["Apply your policy<br/>deny lists, required roles"]
+    P --> B["Build a small bundle<br/>one capability per role, hard cap"]
+    B --> F["Keep only what this<br/>agent can actually run"]
+    F --> R["Routed set with<br/>exact files to read"]
 ```
 
-One index spans every harness on your machine. Queries notice new, removed, or updated skills, agents, commands, and plugins, plus real MCP/plugin configuration changes, and refresh the registry themselves. Invalid config fails loudly instead of guessing. Each runtime receives only capabilities it can genuinely execute.
+- **One index for every agent** on your machine, deduplicated, and refreshed automatically when you install, remove or update a skill.
+- **Reads what each skill is about**, not just its one-line description: the most distinctive words of every skill's body are indexed at rebuild.
+- **Bundles, not long lists.** A route fills complementary roles (primary method, context, integration, verification, support) under a hard cap.
+- **Optional upgrades, never required:** an embedding sidecar for semantic re-ranking, and a decision-model stage (for example [Laya](https://pypi.org/project/laya/) or a cross-encoder) that starts in shadow mode so you can measure it before trusting it.
 
-## Why
+## Prompt-injection firewall for skills and MCP
 
-Agent capability directories are exploding:
+<p align="center">
+  <img src="docs/demo-audit.png" alt="Lockkeeper audit flagging a skill as hostile for an instruction override and a data-exfiltration pipeline" width="72%">
+</p>
 
-- Three MCP servers can eat 140k tokens before real work starts.
-- Copied skills ship hidden instructions nobody reads.
-- Existing tools manage *servers*; none route *tasks* across *all* installed capabilities, and none screen what you install.
+Skills and plugins are instructions your agent follows. Lockkeeper's scanner finds text that tries to override the agent, commands that send secrets or files to the network, credential-store access, code that decodes and runs hidden payloads, destructive commands, and invisible Unicode, across Markdown, configs and scripts.
 
-Lockkeeper is the missing layer between your task and your toolbox:
+- **CI-ready verdicts:** `clean`, `suspect`, `hostile` with exit codes 0, 1, 2.
+- **Live protection:** a Claude Code hook blocks hostile tool calls before they run.
+- **Evidence:** signed receipts prove what was scanned and that results weren't altered.
+- **Optional:** dependency CVE checks against osv.dev, and a second-pass LLM review.
 
-| Layer | Command | Status |
-|---|---|---|
-| Index and inventory | `lockkeeper rebuild`, `lockkeeper check` | ✅ shipped |
-| Task routing | `lockkeeper search`, `lockkeeper route` / `bundle` | ✅ shipped |
-| Context-savings report | `lockkeeper route --savings` | ✅ shipped |
-| Prompt-injection firewall | `lockkeeper audit`, `lockkeeper hook` | ✅ shipped (static + live) |
-| Signed audit receipts | `--receipt-out` / `--verify-receipt` | ✅ shipped |
-| Dependency CVE gate | `--check-deps` (osv.dev) | ✅ shipped |
-| Install and lock | `lockkeeper install`, `cap.lock` | 🔜 roadmap |
-| Remote discovery | `lockkeeper search --remote` | 🔜 roadmap |
+Full details: **[docs/FIREWALL.md](docs/FIREWALL.md)**.
 
-See [ROADMAP.md](ROADMAP.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+## How Lockkeeper compares
 
-## The firewall
+| | Routes each task | Skills, MCP, plugins and tools, across agents | Uses what a skill's body says | Injection firewall | Needs a model or GPU |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Loading every skill into context | ✗ | – | ✓, at a huge token cost | ✗ | no |
+| Built-in skill lists (name and description only) | agent guesses | one agent | ✗ | ✗ | no |
+| Learned skill routers (e.g. SkillRouter, 1.2B parameters) | ✓ | skills only | ✓ | ✗ | yes |
+| MCP server managers | ✗ | MCP only | – | ✗ | no |
+| Skill security scanners | ✗ | ✗ | ✓ | ✓ | some |
+| **Lockkeeper** | **✓** | **✓** | **✓** | **✓** | **no** |
 
-Every capability folder, plugin manifest, MCP config, and live tool call can pass through `lockkeeper audit`: a dependency-free static scanner with verdicts you can gate on.
+## FAQ
 
-```mermaid
-flowchart LR
-    A["Skill folder,<br/>manifest, or hook payload"] --> C{"lockkeeper audit"}
-    C -- clean --> G["✅ allow"]
-    C -- suspect --> W["⚠️ warn"]
-    C -- hostile --> X["⛔ block · exit 2"]
-    C -.-> Rc["HMAC-SHA256<br/>signed receipt"]
-```
+### How do I stop too many skills from filling my Claude Code context window?
+Keep your everyday skills where Claude Code loads them, and put the large collection in a skills library that Lockkeeper indexes but your agent doesn't load on its own. Then run `lockkeeper hooks install claude`: each prompt arrives with the few library skills that fit it, and the agent reads only those `SKILL.md` files instead of carrying every description in its context.
 
-It detects instruction-override phrasing, exfiltration pipelines (secrets → curl/wget/nc, including PowerShell `iwr | iex`), credential-store access, obfuscated execution (`base64 -d | sh`), destructive commands, hidden directive comments, and invisible or homoglyph Unicode. It scans Markdown, JSON/TOML/YAML, and common script and config types (shell, PowerShell, batch, Python, JS/TS, Ruby, `.env`, Makefiles, and any file with a shebang). Executable payloads (`.pyc`, `.so`, `.dll`, `.wasm`) inside an audited directory can't be text-scanned, so they're hashed and floored to at least `suspect`: a skill that ships bytecode never audits clean. A symlink that points outside the audited directory is flagged too, since its target was never scanned.
+### Does Lockkeeper work with MCP servers?
+Both ways. It indexes the MCP servers and tools your agents have configured and routes to them, and it is itself an MCP server (`lockkeeper mcp`) that Codex, Cursor, Windsurf, Cline and other clients can call.
 
-Verdicts map to CI-friendly exit codes (`clean` / `suspect` / `hostile` → `0` / `1` / `2` under `--strict`). Every JSON finding carries a SkillTrustBench `taxonomy` tag (T01–T09) so results stay comparable across skill-security tooling. With `--check-deps`, pinned dependencies are checked against osv.dev; with `--llm-scan` (opt-in twice: flag plus environment variables), an OpenAI-compatible endpoint adds a second-pass review that the offline scanner never depends on.
+### How do I check a skill from GitHub for prompt injection before installing it?
+Run `lockkeeper audit path/to/skill --recursive --strict`. A `hostile` verdict (exit code 2) means don't install it. See [docs/FIREWALL.md](docs/FIREWALL.md).
 
-### Verifiable evidence
+### Does Lockkeeper send my prompts or code anywhere?
+No. Routing, indexing and auditing run locally. The only network features are opt-in: the osv.dev dependency check, the LLM scan, remote decision providers, and the optional embedding sidecar, which downloads its model once.
+
+### Is there telemetry?
+Only if you opt in with `lockkeeper telemetry on`. It shares anonymous daily counts (which commands ran and how fast), never prompts, skill names or file paths, and `DO_NOT_TRACK=1` always turns it off. See [docs/TELEMETRY.md](docs/TELEMETRY.md).
+
+### Do I need a GPU, an API key or an embedding model?
+No. The core uses only the Python standard library. Embeddings and decision models are optional add-ons.
+
+### How many skills can Lockkeeper handle?
+It's tested with up to 79,141 skills. At typical sizes (hundreds to a few thousand) routing and re-indexing take well under a second to a few seconds.
+
+### Will it choose worse skills than my agent would on its own?
+Measure it: `scripts/bench_routing.py` runs the public benchmark, and `scripts/eval_decision.py` evaluates labeled tasks from your own history.
+
+## Documentation
+
+| Guide | What's in it |
+|---|---|
+| [Configuration](docs/CONFIGURATION.md) | All commands, projects and policy packs, freshness, long prompts, hooks, MCP, optional models |
+| [Firewall](docs/FIREWALL.md) | What the scanner detects, verdicts, receipts, live hooks |
+| [Benchmark](docs/BENCHMARK.md) | Methods, full results, comparison with published routers, caveats |
+| [Telemetry](docs/TELEMETRY.md) | Exactly what opt-in telemetry collects, and how to turn it off |
+| [Architecture](docs/ARCHITECTURE.md) | How the index, router and firewall fit together |
+| [Roadmap](ROADMAP.md) | What's shipped and what's next |
+
+## Contributing
+
+Issues, ideas and pull requests are welcome. To run the tests:
 
 ```sh
-lockkeeper audit ~/skills/some-skill --recursive --strict \
-  --receipt-out receipt.json --receipt-key key.hex
-# later, prove nothing was altered:
-lockkeeper audit --verify-receipt receipt.json --receipt-key key.hex   # exit 0 valid, 1 tampered
+HOME="$(mktemp -d)" python3 -m unittest discover -s tests -p "test_*.py" -t .
 ```
 
-Receipts bind to the requested targets and the paths actually scanned, so they're evidence, not decoration. Useful as CI artifacts and audit trails.
+Found a security issue or a way past the firewall? Please report it privately per [SECURITY.md](SECURITY.md).
 
-### Watching live tool calls
+---
 
-Beyond static files, register the firewall as a Claude Code hook and hostile tool calls are blocked before execution:
+<div align="center">
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [{ "command": "lockkeeper hook", "timeout": 5000 }]
-  }
-}
-```
+Built and maintained by **[Himanshu (@Hannay001)](https://github.com/Hannay001)** · [MIT License](LICENSE)
 
-Works with any harness that supports stdin JSON hooks (Claude Code, Codex, ...).
-The live hook scans the string values a tool will actually execute (not their
-JSON-escaped form), so tabs and quotes can't hide a command. It fails closed on
-oversized input and on any `high` or `critical` finding. Medium-only `suspect` traffic is allowed with a warning to avoid turning
-low-confidence signals into a noisy execution blocker.
+**If Lockkeeper saves you context or catches something nasty, a ⭐ helps other developers find it.**
 
-## Install
-
-### Way 1 — no terminal skills required (one paste)
-
-Copy the prompt in [PROMPT.md](PROMPT.md) and paste it into any AI coding agent you already have. It installs Lockkeeper, binds it to every harness it finds on your machine, builds the index, and reports back in plain language.
-
-### Way 2 — terminal, zero manual wiring
-
-```sh
-git clone https://github.com/Hannay001/lockkeeper.git
-cd lockkeeper
-./install.sh        # symlinks `lockkeeper`, then auto-detects and binds every harness on this machine
-lockkeeper snapshot-runtimes
-lockkeeper rebuild
-lockkeeper doctor          # shows each bound harness and its skill count
-```
-
-The installer scans for Claude Code, Codex, Cursor, Jcode, Hermes, OpenCode, Gemini, Copilot, Windsurf, Cline, plus anything unknown that looks like an agent harness under your home directory. Bindings land in `config/local.toml` (git-ignored, machine-local).
-
-```sh
-CAP_RUNTIMES=claude,codex ./install.sh   # bind only these two
-CAP_NO_INIT=1 ./install.sh               # install without auto-binding
-```
-
-### Way 3 — pip install (wheel)
-
-```sh
-pip install git+https://github.com/Hannay001/lockkeeper.git
-lockkeeper doctor   # entry points: lockkeeper, lockkeeper-audit, lockkeeper-hook
-```
-
-This installs the CLI from the packaged wheel (CI builds and functionally smokes it on every push, including Windows). Harness auto-binding still uses `install.sh` or `lockkeeper init`.
-
-### Route and audit in 30 seconds
-
-```sh
-# Route a task from any bound harness's perspective
-lockkeeper route --runtime claude --stdin --max 8 <<'CAPABILITY_QUERY'
-audit our payment webhook for race conditions
-CAPABILITY_QUERY
-
-# Audit any skill folder before installing it
-lockkeeper audit ~/Downloads/some-skill --recursive --strict
-```
-
-## Configuration
-
-Structural paths come from `config/default.toml`; add per-project overlays as `config/<name>.toml` and select them with `--project <name>`. Project-specific routing policy lives in declarative **policy packs**: see [policies/example.json](policies/example.json).
-
-`lockkeeper snapshot-runtimes` and `lockkeeper rebuild` write runtime inventory to a machine-local state dir (`~/.local/state/cap/`), never into your clone. The copies under `data/snapshots/` are read-only seeds used before the first snapshot run, so `git status` stays clean after normal use.
-
-The optional semantic sidecar (`embedder/`) adds embedding re-ranking on top of lexical scoring; everything works without it.
-
-### Keeping the index fresh
-
-You rarely need to run `rebuild` by hand. Every `route`/`search` stats the few hundred directories that contain capability folders (well under a millisecond for 26k skills) and compares a fingerprint of the harness settings that define capabilities: MCP servers, plugin enablement, the router's own config. Installing, removing, moving, or updating a skill, agent, command, or plugin version repairs the registry on the next query with a plain rebuild. Session state that harnesses rewrite on their own (a Claude Code project entry per folder you open, Codex project trust, model choices) is ignored. Real MCP/plugin changes re-capture harness snapshots under a 45-second budget; if a harness CLI is slow or broken, the query rebuilds from your config and the last snapshots, and prints a note on stderr. `lockkeeper doctor` shows whether the index is fresh. Editing the text of an existing `SKILL.md` is picked up by `lockkeeper check` and `rebuild`.
-
-### Decision providers (optional)
-
-A decision model can judge the top of the ranking, asking of each candidate "would this capability help with this task?", and Lockkeeper blends the answers into its own scores. It can be [Laya](https://pypi.org/project/laya/) (local), hosted Jev, or any `/v1/systemone` server, or a local cross-encoder reranker. Lockkeeper keeps deny rules, eligibility, required lanes, and the portfolio cap. The provider is off by default, and it starts in shadow mode, which reports its alternative bundle next to the normal route:
-
-```toml
-# config/local.toml
-[extensions.decision]
-provider = "systemone"
-endpoint = "http://127.0.0.1:8000/v1/systemone"   # laya-serve on this machine
-mode = "shadow"                                    # then "rerank" once measured
-```
-
-`scripts/eval_decision.py` compares a provider against the baseline on labeled tasks from your own history. See [decision/README.md](decision/README.md).
-
-### Resource corpora
-
-A large reference collection (thousands of statute sections, API pages, case-law batches) can route as one capability instead of thousands:
-
-```toml
-[[extensions.resource_corpora]]
-name = "german-law"
-root = "~/.agents/skills/german-law"
-description = "German statutes and case law: BGB, HGB, GmbHG, StGB, ZPO."
-```
-
-Shards leave global ranking and the semantic index. Their lexical matches lift the corpus, and a routed corpus lists its best shards as `resources`. The savings line reports them separately (`resource shards: loaded 5 of 21,087`), and `lockkeeper search --corpus german-law "Widerruf Fernabsatz"` searches inside one corpus.
-
-## Development
-
-```sh
-HOME="$(mktemp -d)" python3.11 -m unittest discover -s tests -p "test_*.py" -t .
-ruff check .
-python3 scripts/cap_audit.py            # self-audit
-python3 scripts/bench_context_savings.py   # regenerate the Proof table
-```
-
-Requirements: Python 3.11+, no third-party dependencies in the core path. macOS, Linux, and Windows are all covered by CI (`ubuntu`, `macos`, `windows-latest`); see [docs/windows.md](docs/windows.md) for the Windows symlink-vs-junction notes.
-
-## Proof: your prompt stays flat as your toolbox grows
-
-The point of routing is that **a bigger library should not mean a bigger prompt.** Here is `lockkeeper route --savings` across six everyday tasks on a real machine with **58,018 eligible capabilities** (~77.5M tokens of skill bodies if you naively loaded them all):
-
-| Task | Capabilities loaded | Tokens in context | Kept out of context |
-|---|--:|--:|--:|
-| migrate the auth module to a new token API | 4 | ~8,800 | 99.99% |
-| audit a payment webhook for race conditions | 4 | ~7,400 | 99.99% |
-| write unit tests for a python data pipeline | 4 | ~3,800 | 100.00% |
-| review a react component for accessibility | 4 | ~10,400 | 99.99% |
-| debug a failing CI build on github actions | 6 | ~8,700 | 99.99% |
-| add rate limiting to a REST endpoint | 4 | ~11,900 | 99.98% |
-
-Median ~8,700 skill-body tokens in context instead of ~77.5M. The routed bundle stays in the **single-digit-thousands of tokens no matter how many capabilities you install**, because selection happens *before* the prompt, not after.
-
-The invariant is the claim, not the absolute figures. An earlier run of this same benchmark against a **5,898**-capability index produced a median of **9,164** tokens: a 10x smaller library, essentially the same prompt.
-
-Numbers are estimates (source-body bytes ÷ 4; MCP/tool connectors excluded since they are called, not read) and scale with your own library. Reproduce them on your machine:
-
-```sh
-lockkeeper rebuild
-python3 scripts/bench_context_savings.py            # the table above
-lockkeeper route --savings --runtime claude "review a python PR for security bugs"
-```
-
-## Maintainer
-
-Lockkeeper is built and maintained by **[Himanshu (@Hannay001)](https://github.com/Hannay001)**. Issues, ideas, and PRs are welcome. If it saves you context or catches something nasty, a ⭐ genuinely helps.
-
-## Security
-
-Found a bypass or vulnerability? Please report privately per [SECURITY.md](SECURITY.md) rather than opening a public issue.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+</div>

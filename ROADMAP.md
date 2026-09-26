@@ -100,7 +100,7 @@ the next feature release.
       installed from `@v1.1.2` and driven through doctor → snapshot-runtimes →
       rebuild → route plus the audit and hook firewall paths.
 
-## Unreleased — Freshness, scale, and decision providers (September 2026 audit)
+## Unreleased — Freshness, scale, routing quality, MCP and pre-prompt routing (September 2026)
 
 - [x] Registry no longer goes stale on harness noise: config fingerprints are
       narrowed to the keys discovery reads (Claude project entries, Codex
@@ -118,9 +118,27 @@ the next feature release.
       shadow mode and an evaluation harness.
 - [x] Resource corpora: large reference collections route as one capability
       with top-k shard resources.
-- Next: fine-tune a Laya (or cross-encoder) checkpoint on labeled
-  Lockkeeper routing tasks, and promote it from shadow to rerank only when
-  `eval_decision.py` shows a gain.
+- [x] Public routing benchmark (`scripts/bench_routing.py`, docs/BENCHMARK.md) on
+      SkillRouter Eval Core: 79,141 real skills, 75 SkillsBench tasks.
+- [x] Ranking quality: Hit@1 0.253 → 0.547 on the full 79k pool (0.347 → 0.653
+      at 26k), bundle recall 0.206 → 0.417 -- body keywords (tf-idf), graded
+      IDF, plural and umlaut matching, prompt tokenization, linear match
+      breadth, and namesake skills no longer hidden.
+- [x] Long prompts route (clipped at 16k chars / 256 terms) instead of being
+      refused above 64 words.
+- [x] Decision-provider blend reorders only its shortlist, on normalized
+      scores (it used to push the shortlist below unjudged rows).
+- [x] `lockkeeper mcp`: route, search and audit over MCP, registry kept warm.
+- [x] `lockkeeper route-hook` + `lockkeeper hooks install claude`: every
+      Claude Code prompt arrives with the capabilities that fit it.
+- [x] Opt-in, anonymous telemetry (`lockkeeper telemetry on`); off by default,
+      no endpoint shipped yet.
+- Next: a keyword cache so re-indexing very large registries only re-reads
+  changed skills (rebuild at 79k went 42 s → 100 s with body keywords).
+- Next: publish to PyPI (`pip install lockkeeper`; the name is free) with
+  trusted publishing from CI.
+- Next: fine-tune a small reranker on labeled Lockkeeper routing tasks and
+  promote it from shadow to rerank only when `eval_decision.py` shows a gain.
 
 ## v1.2 — Pre-prompt activation and measurable context budgets
 
@@ -129,6 +147,9 @@ must happen **before the prompt** or the catalog simply becomes another pile.
 
 - One-command adapters for Claude Code, Codex, Cursor, Jcode, Hermes, and
   OpenCode that call `lockkeeper route` before capability bodies enter context.
+  Claude Code is done (`lockkeeper hooks install claude`); every MCP client can
+  call `lockkeeper mcp`. Next: prompt hooks for the other harnesses as they add
+  a prompt-submit event.
 - Per-runtime context budgets with explicit fallback behavior when routing
   confidence is low.
 - A first-class `lockkeeper explain` view: what was eligible, selected, rejected,
@@ -195,4 +216,6 @@ Deferred (documented design limits / tuning):
 
 - Running a hosted registry service.
 - Replacing MCP server management apps (complementary, not competing).
-- Telemetry of any kind.
+- Telemetry that is on by default, or that ever includes prompts, capability names or
+  paths. Opt-in anonymous daily counts exist (`lockkeeper telemetry on`, see
+  docs/TELEMETRY.md); nothing is sent unless a user turns it on.
