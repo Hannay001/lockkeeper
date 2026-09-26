@@ -3627,7 +3627,14 @@ def query_terms(query: str) -> list[tuple[str, float]]:
             continue
         for addition in additions:
             weighted.setdefault(addition, 0.55)
-    return list(weighted.items())
+    # "structure" and "structures" match the same words (term_forms); counting both
+    # would score one concept twice.
+    merged: dict[tuple[str, tuple[str, ...]], str] = {}
+    terms: dict[str, float] = {}
+    for token, weight in weighted.items():
+        first = merged.setdefault(term_forms(token), token)
+        terms[first] = max(terms.get(first, 0.0), weight)
+    return list(terms.items())
 
 
 UMLAUT_FOLDING = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
@@ -3662,6 +3669,47 @@ def _term_pattern(term: str) -> re.Pattern[str]:
 
 def term_in_text(term: str, text: str) -> bool:
     return _term_pattern(term).search(fold_umlauts(text)) is not None
+
+
+@lru_cache(maxsize=8192)
+def term_forms(term: str) -> tuple[str, tuple[str, ...]]:
+    """(head, tails): a query term matches a whole word spelled head + one of tails.
+
+    Light English plural folding, so "structures" finds "structure", "pdf" finds
+    "PDFs" and "dependencies" finds "dependency" -- and a singular and a plural
+    query term reduce to the same forms. Terms with digits or symbols ("c++",
+    "node.js", "3d"), two-letter terms, and three-letter terms ending in "s"
+    ("aws", "css", "dns") match exactly.
+    """
+    if len(term) < 3 or not (term.isascii() and term.isalpha()) or (len(term) == 3 and term.endswith("s")):
+        return term, ("",)
+    if len(term) == 3:
+        return term, ("es", "s", "")
+    if term.endswith("ies"):
+        return term[:-3], ("ies", "ie", "y")
+    if term.endswith("y") and term[-2] not in "aeiou":
+        return term[:-1], ("ies", "ie", "y")
+    if term.endswith(("sses", "ches", "shes", "xes", "zes")):
+        return term[:-2], ("es", "")
+    if term.endswith(("ss", "ch", "sh", "x", "z")):
+        return term, ("es", "")
+    if term.endswith("s") and not term.endswith(("us", "is")):
+        return term[:-1], ("es", "s", "")
+    return term, ("es", "s", "")
+
+
+@lru_cache(maxsize=8192)
+def _term_forms_pattern(term: str) -> re.Pattern[str]:
+    """Whole-word matcher for term_forms(term), literal-first like _term_pattern()."""
+    head, tails = term_forms(fold_umlauts(term))
+    escaped = re.escape(head)
+    alternatives = "|".join(re.escape(tail) for tail in tails)
+    return re.compile(rf"{escaped}(?<![a-z0-9]{escaped})(?:{alternatives})(?![a-z0-9])")
+
+
+def term_matches(term: str, folded_text: str) -> bool:
+    """term_in_text() with plural folding; folded_text must already be umlaut-folded."""
+    return _term_forms_pattern(term).search(folded_text) is not None
 
 
 @lru_cache(maxsize=64)
@@ -3730,19 +3778,24 @@ def search_score(
         direct_matches += 1
         base_matches += 1
     for term, weight in terms or query_terms(query):
-        # Equivalent to term_in_text(term, field) on the pre-folded fields above.
-        matches = _term_pattern(term).search
+        # term_matches() on the pre-folded fields above: whole words, plural forms folded.
+        pattern = _term_forms_pattern(term)
+        matches = pattern.search
         in_alias = bool(alias_text) and matches(folded_alias) is not None
+        # The pre-check compares the term's head with the FOLDED fields. Query terms are
+        # umlaut-folded, and against the raw fields no word written with an umlaut
+        # ("Kündigung") could ever match.
+        head = term_forms(term)[0]
         if (
             not in_alias
-            and term not in name
-            and term not in description
-            and term not in source
-            and term not in category
+            and head not in folded_name
+            and head not in folded_description
+            and head not in folded_source
+            and head not in folded_category
         ):
             continue
         matched = False
-        if name == term:
+        if pattern.fullmatch(folded_name) is not None:
             score += 40 * weight
             matched = True
         elif matches(folded_name) is not None:
@@ -4236,14 +4289,15 @@ class _TokenPostings:
             found = text.find(needle, starts[index] + len(tokens[index]) + 1)
 
     def positions_matching(self, term: str, folded: str) -> set[int]:
-        """Positions where term_in_text(term, ...) holds for some indexed text, a superset.
+        """Positions where term_matches(term, ...) holds for some indexed text, a superset.
 
         Tokens are maximal runs of the term's own character class, so a whole-word
-        match inside the text is a whole-word match inside one token.
+        match inside the text is a whole-word match inside one token -- and every
+        word form of the term contains its head.
         """
-        pattern = _term_pattern(term)
+        pattern = _term_forms_pattern(term)
         positions: set[int] = set()
-        for token in self.tokens_containing(folded):
+        for token in self.tokens_containing(term_forms(folded)[0]):
             if pattern.search(token) is not None:
                 positions.update(self.postings[token])
         return positions
@@ -4285,8 +4339,8 @@ class _AliasIndex:
 class _LexicalIndex:
     """Token postings over one ranking pool, so a query only touches records it can match.
 
-    search_score() credits a term only where it occurs as a whole word (term_in_text) in
-    a field, and a record no full-weight term or alias phrase matches scores exactly 0.0.
+    search_score() credits a term only where one of its word forms occurs as a whole
+    word (term_matches) in a field, and a record no full-weight term or alias phrase matches scores exactly 0.0.
     Looking terms up here finds the records a query can score -- a superset, which
     search_score() then scores exactly -- in time proportional to the matches instead of
     terms x records. Built once per distinct pool and reused across ranking passes: a
@@ -4315,16 +4369,17 @@ class _LexicalIndex:
         self._aliases: list[_AliasIndex] = []
 
     def name_description_frequency(self, term: str, threshold: float) -> Optional[int]:
-        """How many rows contain term in "name description", counted only until the
-        count exceeds threshold (all damped_query_terms() compares). None when term is
-        not a token-class string, so its occurrences need not sit inside one token."""
+        """How many rows contain the term's head (term_forms) in "name description",
+        counted only until the count exceeds threshold (all damped_query_terms()
+        compares). None when term is not a token-class string, so its occurrences need
+        not sit inside one token."""
         if not _TOKEN_RE.fullmatch(term):
             return None
         key = (term, threshold)
         cached = self._frequencies.get(key)
         if cached is None:
             rows: set[int] = set()
-            for token in self.name_description.tokens_containing(term):
+            for token in self.name_description.tokens_containing(term_forms(term)[0]):
                 rows.update(self.name_description.postings[token])
                 if len(rows) > threshold:
                     break
@@ -4439,7 +4494,7 @@ def lexical_scores(
             extra = extra_by_category[category] = [
                 term_index
                 for term_index, (term, _weight) in enumerate(resolved)
-                if _term_pattern(term).search(title) is not None
+                if _term_forms_pattern(term).search(title) is not None
             ] + unindexed
         term_indexes = relevant.get(position, [])
         if extra:
@@ -4474,7 +4529,8 @@ def damped_query_terms(
         if frequency is None:
             if blobs is None:
                 blobs = [f"{record['name']} {record['description']}".lower() for record in pool]
-            frequency = sum(1 for blob in blobs if term in blob)
+            head = term_forms(term)[0]  # "structures" and "structure" are one term
+            frequency = sum(1 for blob in blobs if head in blob)
         if frequency > threshold:
             common_content_term = common_content_term or weight >= 1.0
             weight *= IDF_DAMP_FACTOR

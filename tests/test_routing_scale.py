@@ -84,6 +84,47 @@ class NamesakeTest(unittest.TestCase):
         self.assertEqual(sum(rid in {"skill:pdf:claude", "skill:pdf:shared"} for rid, _ in ranked), 1)
 
 
+class WordFormTest(unittest.TestCase):
+    def test_plural_and_singular_find_each_other(self) -> None:
+        crystal = skill("crystal-tool", "Read crystal structures from CIF files")
+        dependency = skill("dep-audit", "Audit one dependency for known issues")
+        for query, record in (
+            ("parse the crystal structure", crystal),
+            ("audit our dependencies", dependency),
+            ("dependency audit", dependency),
+        ):
+            with self.subTest(query=query):
+                self.assertGreater(registry.search_score(record, query, "claude"), 0.0)
+
+    def test_singular_and_plural_query_terms_merge(self) -> None:
+        terms = dict(registry.query_terms("structure structures dependency dependencies"))
+        self.assertEqual(len(terms), 2)
+
+    def test_short_and_symbolic_terms_match_exactly(self) -> None:
+        self.assertEqual(registry.term_forms("aws"), ("aws", ("",)))
+        self.assertEqual(registry.term_forms("node.js"), ("node.js", ("",)))
+        self.assertFalse(registry.term_matches("aws", "awss console"))
+        self.assertFalse(registry.term_matches("node.js", "node.jss runtime"))
+        self.assertTrue(registry.term_matches("pdf", "merge pdfs"), "longer alphabetic terms fold plurals")
+
+    def test_umlaut_words_match_descriptions(self) -> None:
+        """Regression: the containment pre-check compared folded query terms with
+        unfolded record text, so no word written with an umlaut ever matched."""
+        letter = skill("brief-helper", "Kündigung schreiben für den Mietvertrag")
+        other = skill("miet-helper", "Mietvertrag prüfen")
+        for query in ("Kündigung Mietvertrag", "Kuendigung Mietvertrag"):
+            with self.subTest(query=query):
+                self.assertGreater(
+                    registry.search_score(letter, query, "claude"), registry.search_score(other, query, "claude")
+                )
+
+    def test_dotted_tokens_contribute_their_parts(self) -> None:
+        terms = dict(registry.query_terms("compute stats from packets.pcap into solution.py."))
+        self.assertIn("pcap", terms)
+        self.assertIn("py", terms)
+        self.assertNotIn("solution.py.", terms)
+
+
 class LongQueryTest(unittest.TestCase):
     def test_short_queries_are_untouched(self) -> None:
         self.assertEqual(registry.focus_query("  review   a pull request "), ("review a pull request", False))
