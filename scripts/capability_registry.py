@@ -6679,6 +6679,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Bind even when a requested runtime is absent"
     )
     subparsers.add_parser("doctor", help="Show detected harnesses and routing health")
+    mcp_parser = subparsers.add_parser(
+        "mcp", help="Serve route, search and audit to any MCP client (stdio), with the registry kept warm"
+    )
+    mcp_parser.add_argument(
+        "--runtime", choices=["codex", "claude", "hermes", "jcode", "shared"], default="claude",
+        help="Default runtime for route and search",
+    )
+    subparsers.add_parser("telemetry", help="Opt-in anonymous usage counts: status, on, off, show, flush")
     return parser
 
 
@@ -6920,6 +6928,10 @@ def _main() -> int:
             from cap_setup import main as setup_main
 
             return setup_main(["doctor"])
+        elif args.command == "mcp":
+            import mcp_server
+
+            return mcp_server.main(["--runtime", args.runtime], project=args.project or "")
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
         if getattr(args, "json", False):
