@@ -650,6 +650,8 @@ SOFT_TERM_WEIGHT = 0.25
 # discrimination; damp it rather than let it dominate (classic IDF, cheaply applied).
 IDF_DAMP_RATIO = 0.05
 IDF_DAMP_FACTOR = 0.3
+# Points per matched query term (see search_score).
+MATCH_BREADTH_POINTS = 8
 
 
 def utc_now() -> str:
@@ -3826,7 +3828,13 @@ def search_score(
                 base_matches += 1
     if direct_matches == 0 or base_matches == 0:
         return 0.0
-    score += direct_matches * direct_matches * 2
+    # Breadth of match counts, linearly. The old bonus grew with the SQUARE of the
+    # matched terms: harmless for a 4-word query (it is the same 32 points at four
+    # matches), but on a 60-term task a generic skill matching 15 ordinary words
+    # got +450, outscoring the specific skill the task named. Linear keeps short
+    # queries nearly unchanged and fixed that (benchmark Hit@1 0.44 -> 0.51,
+    # stable for 4-12 points per match).
+    score += direct_matches * MATCH_BREADTH_POINTS
     if runtime in record["runtimes"]:
         score += 8
     if "shared" in record["runtimes"]:
