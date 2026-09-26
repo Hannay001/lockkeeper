@@ -617,6 +617,19 @@ SYNTAX_STOPWORDS = {
     "man", "mit", "nach", "nicht", "noch", "nur", "ob", "oder", "ohne", "schon",
     "sein", "sich", "sind", "sowie", "über", "ueber", "um", "und", "unter", "vom",
     "von", "vor", "war", "werden", "wird", "zu", "zum", "zur", "zwischen",
+    # More English function words, modal verbs and prompt filler. Agents route whole
+    # prompts ("You want to ... given a few files ... each result should look like"),
+    # and at full weight these words matched generic trigger-phrase descriptions
+    # ("use when the user wants to look at ...") better than the skill the task needed.
+    "above", "after", "again", "against", "am", "another", "before", "below", "between",
+    "both", "could", "did", "doing", "down", "during", "each", "either", "etc", "every",
+    "few", "further", "given", "had", "he", "her", "here", "hers", "herself", "him",
+    "himself", "his", "itself", "let", "like", "look", "may", "might", "mine", "must",
+    "myself", "neither", "nor", "off", "once", "only", "other", "ought", "ours",
+    "ourselves", "out", "over", "own", "please", "same", "shall", "she", "should",
+    "since", "sure", "themselves", "through", "too", "under", "until", "up", "upon",
+    "very", "want", "wants", "whether", "while", "within", "without", "yet", "yours",
+    "yourself", "yourselves",
 }
 
 # Generic action verbs. Real lane signal ("review" -> verification, "draft" -> output)
@@ -3575,16 +3588,32 @@ def ensure_query_registry_fresh(output: Path) -> Optional[list[dict[str, Any]]]:
         release()
 
 
+def query_token(raw: str) -> str:
+    """Drop sentence punctuation around a token: "diffraction." and "--" carry none.
+
+    Keeps meaningful symbols: a leading dot (".net", ".env") and "+"/"#" ("c++", "c#").
+    """
+    token = raw.rstrip(".-")
+    return token.lstrip("-") if token.startswith("-") else token
+
+
 def query_terms(query: str) -> list[tuple[str, float]]:
     # Fold umlauts BEFORE tokenizing: the split pattern is ASCII-only and would
     # otherwise shred words like "Kündigungsschreiben" into dead fragments.
     normalized = fold_umlauts(clean_text(query).lower())
-    base = [token for token in re.split(r"[^a-z0-9+#.-]+", normalized) if len(token) > 1]
+    base = [token for token in (query_token(raw) for raw in re.split(r"[^a-z0-9+#.-]+", normalized)) if len(token) > 1]
     weighted: dict[str, float] = {}
     for token in base:
         if token in SYNTAX_STOPWORDS:
             continue  # pure syntax: never a routing signal
         weighted[token] = SOFT_TERM_WEIGHT if token in SOFT_QUERY_TERMS else 1.0
+        # A dotted token is a file, module or host name: "packets.pcap", "solution.py",
+        # "mp-226.cif". Its parts, above all the extension, are what a skill describes
+        # ("pcap", "py", "cif"), and the whole token matches almost nothing.
+        if "." in token.strip("."):
+            for part in re.split(r"[.-]+", token):
+                if len(part) > 1 and not part.isdigit() and part not in SYNTAX_STOPWORDS:
+                    weighted.setdefault(part, SOFT_TERM_WEIGHT if part in SOFT_QUERY_TERMS else 1.0)
     expansions = [
         ({"ocr", "scanned"}, ["pdf", "document", "extract", "surya", "markitdown"]),
         ({"cofounder", "candidate"}, ["talent", "recruit", "outreach", "researcher"]),
