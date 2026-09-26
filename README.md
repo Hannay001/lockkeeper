@@ -1,6 +1,11 @@
 <div align="center">
 
-# Lockkeeper
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Hannay001/lockkeeper/main/docs/lockkeeper-logo-dark.png">
+    <img src="https://raw.githubusercontent.com/Hannay001/lockkeeper/main/docs/lockkeeper-logo.png" alt="Lockkeeper" width="460">
+  </picture>
+</h1>
 
 ### The skill router and prompt-injection firewall for AI coding agents
 
