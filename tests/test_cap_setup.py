@@ -83,6 +83,53 @@ class InitBindingTest(unittest.TestCase):
         self.assertFalse((self.repo / "config" / "local.toml").exists())
 
 
+class InitPreservesOperatorConfigTest(unittest.TestCase):
+    """install.sh reruns init; it must not discard keys an operator added."""
+
+    def test_only_managed_keys_are_rewritten(self) -> None:
+        existing = (
+            "# my notes\n"
+            "[project]\n"
+            "surface_roots = [\n  \"/old/a\",\n  \"/old/b\",\n]\n"
+            "name = \"\"\n\n"
+            "[extensions]\n"
+            "legacy_mcp_names = [\"old-server\"]\n"
+            "extra_skill_roots = [\"/old/skills\"]\n\n"
+            "[[extensions.resource_corpora]]\n"
+            "name = \"german-law\"\n"
+            "root = \"~/.agents/skills/german-law\"\n"
+        )
+        merged = cap_setup._merge_bindings(
+            existing,
+            {
+                "project": ("surface_roots", 'surface_roots = ["/new/home"]'),
+                "extensions": ("extra_skill_roots", 'extra_skill_roots = ["/new/skills"]'),
+            },
+        )
+        import tomllib
+
+        data = tomllib.loads(merged)
+        self.assertEqual(data["project"]["surface_roots"], ["/new/home"])
+        self.assertEqual(data["extensions"]["extra_skill_roots"], ["/new/skills"])
+        self.assertEqual(data["extensions"]["legacy_mcp_names"], ["old-server"])
+        self.assertEqual(data["extensions"]["resource_corpora"][0]["name"], "german-law")
+        self.assertIn("# my notes", merged)
+
+    def test_missing_tables_are_appended_and_invalid_files_refused(self) -> None:
+        merged = cap_setup._merge_bindings(
+            "",
+            {
+                "project": ("surface_roots", "surface_roots = []"),
+                "extensions": ("extra_skill_roots", "extra_skill_roots = []"),
+            },
+        )
+        import tomllib
+
+        self.assertEqual(tomllib.loads(merged)["extensions"]["extra_skill_roots"], [])
+        with self.assertRaises(ValueError):
+            cap_setup._merge_bindings("[project\n", {"project": ("surface_roots", "surface_roots = []")})
+
+
 class DoctorTest(unittest.TestCase):
     def test_doctor_lists_detected_and_missing(self) -> None:
         from io import StringIO

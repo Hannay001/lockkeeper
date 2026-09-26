@@ -57,7 +57,7 @@ SKILL_ROOTS: list[tuple[str, Path, str]]
 
 def configured_skill_roots(config: RouterConfig) -> list[tuple[str, Path, str]]:
     """Return the live skill roots, including the configured Hermes surface."""
-    return [
+    builtin = [
         ("shared", Path.home() / ".agents" / "skills", "skills-root"),
         ("codex", Path.home() / ".codex" / "skills", "skills-root"),
         ("claude", Path.home() / ".claude" / "skills", "skills-root"),
@@ -67,11 +67,19 @@ def configured_skill_roots(config: RouterConfig) -> list[tuple[str, Path, str]]:
         ("claude", Path.home() / ".claude" / "plugins" / "cache", "plugin-cache"),
         ("codex", Path.home() / ".codex" / "plugins" / "cache", "plugin-cache"),
         ("hermes", Path.home() / ".hermes" / "plugins", "plugin-cache"),
-        *(
-            (f"bound-{index}", root, "bound-skill-root")
-            for index, root in enumerate(EXTRA_SKILL_ROOTS)
-        ),
     ]
+    # `lockkeeper init` binds every detected skills directory, which includes the
+    # built-in ones above. Binding a built-in root again walked every skill twice
+    # on each rebuild and tagged it with a meaningless "bound-N" runtime.
+    known = {root.resolve(strict=False) for _, root, _ in builtin}
+    extra: list[tuple[str, Path, str]] = []
+    for index, root in enumerate(EXTRA_SKILL_ROOTS):
+        resolved = root.resolve(strict=False)
+        if resolved in known:
+            continue
+        known.add(resolved)
+        extra.append((f"bound-{index}", root, "bound-skill-root"))
+    return [*builtin, *extra]
 
 def _bootstrap_seed_snapshots(config) -> None:
     """Copy checked-in seed snapshots into the machine-local state dir once.
@@ -3758,6 +3766,19 @@ def reindex_semantic(output: Path, quiet: bool = False, timeout: float | None = 
     return True
 
 
+_SEMANTIC_CACHE: dict[tuple[str, str, str, str], dict[str, float]] = {}
+
+
+def _semantic_hit_map(payload: Any) -> dict[str, float]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(hit["id"]): float(hit["cos"])
+        for hit in payload.get("hits", [])
+        if isinstance(hit, dict) and "id" in hit and "cos" in hit
+    }
+
+
 def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "") -> dict[str, float]:
     """capability_id -> cosine, for the top-K semantically nearest capabilities.
 
@@ -3766,8 +3787,41 @@ def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "")
     it did before embeddings existed. This is the ONLY fail-open component in the system;
     the registry staleness guard stays fail-closed. Never raises.
     """
-    if not query.strip():
-        return {}
+    return semantic_hits_many(output, [query], fingerprint, runtime).get(query, {})
+
+
+def semantic_hits_many(
+    output: Path, queries: Iterable[str], fingerprint: str, runtime: str = ""
+) -> dict[str, dict[str, float]]:
+    """semantic_hits() for several queries with ONE sidecar process.
+
+    Every sidecar call cold-starts the embedding model, and a multi-intent route
+    used to pay that once for the task and again for each intent (up to four
+    model loads per route). Results, including failures, are memoized for the
+    process, so each distinct query is embedded at most once.
+    """
+    wanted = list(dict.fromkeys(query for query in queries if query.strip()))
+    results: dict[str, dict[str, float]] = {}
+    pending: list[str] = []
+    for query in wanted:
+        cached = _SEMANTIC_CACHE.get((str(output), fingerprint, runtime, query))
+        if cached is None:
+            pending.append(query)
+        else:
+            results[query] = cached
+    if not pending:
+        return results
+    fetched = _semantic_query_sidecar(output, pending, fingerprint, runtime)
+    for query in pending:
+        hits = fetched.get(query, {})
+        _SEMANTIC_CACHE[(str(output), fingerprint, runtime, query)] = hits
+        results[query] = hits
+    return results
+
+
+def _semantic_query_sidecar(
+    output: Path, queries: list[str], fingerprint: str, runtime: str
+) -> dict[str, dict[str, float]]:
     # Refresh code before inspecting index freshness. A stale index must degrade,
     # but it must not leave a known-stale executable copy in place as a side effect.
     script = semantic_sidecar_script(output, synchronize=True)
@@ -3788,17 +3842,20 @@ def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "")
     interpreter = semantic_interpreter(output)
     if not interpreter.is_file() or not script.is_file():
         return {}
+    command = [
+        str(interpreter), str(script), "query", "--index", str(output),
+        "--topk", str(SEMANTIC_TOPK),
+    ]
+    registry = output / "registry.jsonl"
+    if runtime and registry.is_file():
+        command.extend(["--registry", str(registry), "--runtime", runtime])
+    batched = len(queries) > 1
+    if batched:
+        command.append("--batch")
     try:
-        command = [
-            str(interpreter), str(script), "query", "--index", str(output),
-            "--topk", str(SEMANTIC_TOPK),
-        ]
-        registry = output / "registry.jsonl"
-        if runtime and registry.is_file():
-            command.extend(["--registry", str(registry), "--runtime", runtime])
         proc = subprocess.run(
             command,
-            input=query,
+            input=json.dumps({"queries": queries}) if batched else queries[0],
             text=True,
             capture_output=True,
             timeout=SEMANTIC_TIMEOUT_SECONDS,
@@ -3807,11 +3864,12 @@ def semantic_hits(output: Path, query: str, fingerprint: str, runtime: str = "")
         if proc.returncode != 0 or not proc.stdout.strip():
             return {}
         payload = json.loads(proc.stdout)
-        return {
-            hit["id"]: float(hit["cos"])
-            for hit in payload.get("hits", [])
-            if isinstance(hit, dict) and "id" in hit and "cos" in hit
-        }
+        if not batched:
+            return {queries[0]: _semantic_hit_map(payload)}
+        rows = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(rows, list) or len(rows) != len(queries):
+            return {}
+        return {query: _semantic_hit_map(row) for query, row in zip(queries, rows)}
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return {}
 
@@ -4308,6 +4366,11 @@ def bundle(
     """
     ensure_router_config_valid()
     pack = policy_pack_for(project)
+    intents = query_intents(query)
+    if intents:
+        # One sidecar process embeds the task and every intent together; the
+        # ranked_records() calls below then read the memoized results.
+        semantic_hits_many(output, [query, *intents], registry_manifest_fingerprint(str(output)), runtime)
     ranked = ranked_records(records, query, runtime, output)
     selected: list[dict[str, Any]] = []
 
@@ -4549,7 +4612,6 @@ def bundle(
     # Multi-intent seeding: give every distinct intent at least one primary slot before
     # the generic loop runs, otherwise a route that pre-fills the primaries makes the
     # second intent unrepresentable no matter how well it scored.
-    intents = query_intents(query)
     primary_cap = min(2 * len(intents), 4) if intents else 2
     for intent in intents:
         for score, record in ranked_records(records, intent, runtime, output):
@@ -4689,11 +4751,18 @@ def bundle(
         "output": 5,
         "support": 6,
     }
-    selected.sort(key=lambda item: (lane_order.get(item["lane"], 99), -item["score"], item["name"].lower()))
     if complex_task and not any(item["lane"] == "primary" for item in selected):
         if skipped_testing_best is not None:
-            add(skipped_testing_best[1], "primary", "Best available primary method for this task.",
-                skipped_testing_best[0])
+            best_score, best_record = skipped_testing_best
+            reason = "Best available primary method for this task."
+            # The support loop may already have picked it; promoting that entry
+            # is the only way to give the bundle a primary (add() dedupes by id).
+            existing = next((item for item in selected if item["id"] == best_record["id"]), None)
+            if existing is not None:
+                existing["lane"] = "primary"
+                existing["reason"] = reason
+            else:
+                add(best_record, "primary", reason, best_score)
         else:
             # Fresh installs legitimately have tiny/empty indexes: degrade to a
             # warning instead of failing the flagship demo path.
@@ -4711,6 +4780,8 @@ def bundle(
                 ],
                 "artifacts": {"index": str(output / "Capabilities.md")},
             }
+    # Sort last so a fallback primary lands in lane order, not after support.
+    selected.sort(key=lambda item: (lane_order.get(item["lane"], 99), -item["score"], item["name"].lower()))
     for item in selected:
         item.pop("semantic_key", None)
     eligible_records = [

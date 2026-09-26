@@ -114,10 +114,18 @@ def detect_harnesses() -> list[Harness]:
                 seen_homes.add(root.resolve(strict=False))
 
     already_named = {h.name for h in harnesses.values()}
-    for entry in HOME.iterdir():
-        if not entry.is_dir() or entry.name.startswith(".") is False and entry.name not in {".config"}:
-            if not entry.name.startswith("."):
+    try:
+        home_entries = sorted(HOME.iterdir())
+    except OSError:
+        home_entries = []
+    for entry in home_entries:
+        # Only hidden directories can be harness homes; plain files and
+        # unreadable entries are skipped instead of probed.
+        try:
+            if not entry.name.startswith(".") or not entry.is_dir():
                 continue
+        except OSError:
+            continue
         if entry.name in SKIP_HOME_DIRS or entry.resolve(strict=False) in seen_homes:
             continue
         if entry.name.lstrip(".").split("-")[0] in already_named:
@@ -172,16 +180,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     roots = selected_skill_roots(selection)
     local_path = _repo_root() / "config" / "local.toml"
-    lines = [
-        "# Written by `lockkeeper init` — machine-local bindings; safe to delete.",
-        "# This file is git-ignored and never leaves this machine.",
-        f"[project]\nsurface_roots = [{', '.join(_toml_str(p) for p in _surface_candidates())}]",
-        "",
-        "[extensions]",
-        "extra_skill_roots = [" + ", ".join(_toml_str(r) for r in roots) + "]",
-    ]
+    surface_line = f"surface_roots = [{', '.join(_toml_str(p) for p in _surface_candidates())}]"
+    roots_line = "extra_skill_roots = [" + ", ".join(_toml_str(r) for r in roots) + "]"
+    try:
+        content = _merge_bindings(
+            local_path.read_text(encoding="utf-8") if local_path.is_file() else "",
+            {"project": ("surface_roots", surface_line), "extensions": ("extra_skill_roots", roots_line)},
+        )
+    except ValueError as error:
+        print(f"status: error\nsummary: {local_path} was left unchanged: {error}")
+        return 1
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    local_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    local_path.write_text(content, encoding="utf-8")
 
     print("status: success")
     print(f"bound skill roots ({len(roots)}):")
@@ -198,6 +208,67 @@ def _surface_candidates() -> list[str]:
         if harness.present:
             candidates.append(str(harness.home_dir))
     return candidates
+
+
+LOCAL_HEADER = (
+    "# Written by `lockkeeper init` — machine-local bindings; safe to delete.\n"
+    "# This file is git-ignored and never leaves this machine. `init` rewrites only\n"
+    "# project.surface_roots and extensions.extra_skill_roots; other keys are kept.\n"
+)
+
+
+def _merge_bindings(existing: str, managed: dict[str, tuple[str, str]]) -> str:
+    """Replace only the keys `init` owns, keeping every other line of local.toml.
+
+    `init` runs on every ./install.sh. It used to rewrite the whole file, which
+    silently discarded anything else an operator had configured there (legacy
+    MCP names, resource corpora, decision-provider settings). Raises ValueError
+    when the existing file is not valid TOML or the result would not be, so a
+    hand-edited file is never clobbered.
+    """
+    import re
+    import tomllib
+
+    if existing.strip():
+        try:
+            tomllib.loads(existing)
+        except tomllib.TOMLDecodeError as error:
+            raise ValueError(f"existing file is not valid TOML ({error})") from error
+    lines = existing.splitlines() if existing.strip() else LOCAL_HEADER.rstrip("\n").splitlines()
+    for table, (key, replacement) in managed.items():
+        header = next(
+            (index for index, line in enumerate(lines) if line.strip() == f"[{table}]"),
+            None,
+        )
+        if header is None:
+            lines.extend(["", f"[{table}]", replacement])
+            continue
+        end = next(
+            (index for index in range(header + 1, len(lines)) if lines[index].lstrip().startswith("[")
+             and re.match(r"^\s*\[[^\]]", lines[index]) and "=" not in lines[index].split("#", 1)[0]),
+            len(lines),
+        )
+        key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        start = next((index for index in range(header + 1, end) if key_pattern.match(lines[index])), None)
+        if start is None:
+            lines.insert(header + 1, replacement)
+            continue
+        stop = start + 1
+        value = lines[start].split("=", 1)[1].split("#", 1)[0].strip()
+        if value.startswith("[") and value.count("[") > value.count("]"):
+            # A hand-written multi-line array: drop its continuation lines too.
+            depth = value.count("[") - value.count("]")
+            while stop < end and depth > 0:
+                fragment = lines[stop].split("#", 1)[0]
+                depth += fragment.count("[") - fragment.count("]")
+                stop += 1
+        lines[start:stop] = [replacement]
+    merged = "\n".join(lines).rstrip("\n") + "\n"
+    try:
+        tomllib.loads(merged)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"merged bindings would not be valid TOML ({error})") from error
+    return merged
 
 
 def _toml_str(value: str) -> str:
@@ -227,21 +298,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not any_present:
         print("  (no harnesses found — cap still works standalone with `lockkeeper audit`)")
 
-    registry_manifest = Path.home() / ".agents" / "capabilities" / "manifest.json"
+    output_dir, config_problem = _registry_output_dir()
+    registry_manifest = output_dir / "manifest.json"
+    if config_problem:
+        print("")
+        print(f"router config: {config_problem}")
     if registry_manifest.is_file():
         try:
             data = json.loads(registry_manifest.read_text(encoding="utf-8"))
             counts = data.get("counts", {})
             print("")
             print("registry:")
+            print(f"  location:     {output_dir}")
             print(f"  capabilities: {counts.get('capabilities', 0):,}")
             print(f"  rebuilt at:   {data.get('generated_at', 'unknown')}")
             print(f"  fingerprint:  {data.get('fingerprint', '')[:16]}")
+            print(f"  freshness:    {_registry_freshness(output_dir)}")
         except (OSError, json.JSONDecodeError):
             pass
     else:
         print("")
-        print("registry: not built yet — run `lockkeeper snapshot-runtimes && lockkeeper rebuild`")
+        print(f"registry: not built yet at {output_dir} — run `lockkeeper snapshot-runtimes && lockkeeper rebuild`")
 
     local_config = _repo_root() / "config" / "local.toml"
     print("")
@@ -250,6 +327,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print("binding: none yet — run `lockkeeper init` to bind detected harnesses")
     return 0
+
+
+def _registry_output_dir() -> tuple[Path, Optional[str]]:
+    """The configured registry output, falling back to the default when config is broken.
+
+    doctor used to read ~/.agents/capabilities unconditionally, so a configured
+    output_dir always reported "not built yet". It must still run when the
+    router configuration itself is what is broken.
+    """
+    default = HOME / ".agents" / "capabilities"
+    try:
+        import capability_registry as registry
+    except Exception as error:  # noqa: BLE001 - doctor reports, never crashes
+        return default, f"router could not load ({type(error).__name__}: {error})"
+    if registry.STARTUP_CONFIG_ERROR is not None:
+        return default, f"invalid ({registry.STARTUP_CONFIG_ERROR})"
+    return registry.ROUTER_CONFIG.output_dir, None
+
+
+def _registry_freshness(output_dir: Path) -> str:
+    try:
+        import capability_registry as registry
+
+        registry.assert_registry_fresh(output_dir, deep=False)
+    except RuntimeError as error:
+        text = registry.redact_sensitive_text(error, 200)
+        if registry.auto_refreshable_staleness(error):
+            return f"stale, repaired automatically by the next route/search ({text})"
+        return f"needs attention: {text}"
+    except Exception as error:  # noqa: BLE001 - doctor reports, never crashes
+        return f"unknown ({type(error).__name__})"
+    return "fresh"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
