@@ -53,7 +53,7 @@ DOCS = "docs/TELEMETRY.md"
 COMMANDS = frozenset(
     {
         "route", "bundle", "search", "audit", "hook", "rebuild", "reindex", "check",
-        "doctor", "init", "snapshot-runtimes", "export-csv", "link", "mcp",
+        "doctor", "init", "snapshot-runtimes", "export-csv", "link", "mcp", "route-hook", "hooks",
     }
 )
 RUNTIMES = frozenset({"claude", "codex", "hermes", "jcode", "shared"})

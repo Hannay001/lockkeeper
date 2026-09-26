@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>Your AI agent doesn't need every skill you've installed. It needs the right few, checked for prompt injection.</b><br>
-  Lockkeeper routes each task to the handful of skills, MCP servers and tools that fit it, across Claude Code, Codex, Cursor and 7 more agents. No model, no GPU, no API key.
+  Lockkeeper routes each task (or every prompt, automatically) to the handful of skills, MCP servers and tools that fit it, across Claude Code, Codex, Cursor and 7 more agents. No model, no GPU, no API key.
 </p>
 
 <p align="center">
@@ -78,6 +78,14 @@ lockkeeper route --runtime claude "write unit tests for a python data pipeline"
 pip install git+https://github.com/Hannay001/lockkeeper.git
 lockkeeper doctor
 ```
+
+### Route every prompt automatically (Claude Code)
+
+```sh
+lockkeeper hooks install claude      # one command; undo with `lockkeeper hooks remove claude`
+```
+
+Every prompt you submit now reaches the agent with a short note naming the installed skills that fit it and the exact files to read, so it never has to scan your whole toolbox or remember to ask. Slash commands and short replies like "thanks" pass through untouched, and the hook never blocks a prompt. It adds a fraction of a second on typical libraries (about 2 s at 26k skills; use the MCP server for very large ones).
 
 ### Use it from inside your agent (MCP)
 
@@ -193,9 +201,11 @@ lockkeeper audit --verify-receipt receipt.json --receipt-key key.hex   # exit 0 
 
 **Live protection:** register the firewall as a hook and hostile tool calls are blocked before they run. It fails closed on oversized input and on any high or critical finding.
 
-```json
-{ "hooks": { "PreToolUse": [{ "command": "lockkeeper hook", "timeout": 5000 }] } }
+```sh
+lockkeeper hooks install claude --firewall    # adds a PreToolUse hook to ~/.claude/settings.json
 ```
+
+Any harness with the same stdin contract can call `lockkeeper hook` directly; `lockkeeper hooks show claude --firewall` prints the exact settings entry.
 
 <p align="center">
   <img src="docs/demo-receipt.png" alt="signed scan receipt verified intact with exit code zero" width="60%">

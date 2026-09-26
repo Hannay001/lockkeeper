@@ -6687,6 +6687,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Default runtime for route and search",
     )
     subparsers.add_parser("telemetry", help="Opt-in anonymous usage counts: status, on, off, show, flush")
+    subparsers.add_parser(
+        "route-hook", help="UserPromptSubmit hook: add the capabilities that fit each prompt as context"
+    )
+    subparsers.add_parser(
+        "hooks", help="Wire Lockkeeper into Claude Code: `lockkeeper hooks install claude [--firewall]`"
+    )
     return parser
 
 
@@ -6791,9 +6797,19 @@ def main() -> int:
         _, pre_argv = split_project_argument(sys.argv[1:])
     except (RouterConfigError, RuntimeError, ValueError):
         pre_argv = sys.argv[1:]
-    if next((token for token in pre_argv if not token.startswith("-")), None) == "telemetry":
+    first_command = next((token for token in pre_argv if not token.startswith("-")), None)
+    if first_command == "telemetry":
         position = pre_argv.index("telemetry")
         return telemetry.cli(pre_argv[position + 1 :])
+    if first_command == "hooks":
+        import route_hook
+
+        position = pre_argv.index("hooks")
+        return route_hook.setup_cli(pre_argv[position + 1 :])
+    if first_command == "route-hook":
+        position = pre_argv.index("route-hook")
+        with telemetry.timed(["route-hook"]):
+            return _route_hook(pre_argv[position + 1 :])
     with telemetry.timed(pre_argv) as run:
         code = _main()
         run.failed = code != 0
@@ -6802,6 +6818,22 @@ def main() -> int:
             if isinstance(counts, dict) and isinstance(counts.get("capabilities"), int):
                 run.capabilities = counts["capabilities"]
         return code
+
+
+def _route_hook(argv: list[str]) -> int:
+    """UserPromptSubmit hook (route_hook.py). A broken config adds no context; it never
+    turns every prompt into an error."""
+    try:
+        selected_project, _ = split_project_argument(sys.argv[1:])
+        configure_router(
+            load_router_config(project_name=selected_project, script_path=Path(__file__)),
+            verified_startup=True,
+        )
+    except (RouterConfigError, RuntimeError, OSError, ValueError):
+        return 0
+    import route_hook
+
+    return route_hook.run(argv, ROUTER_CONFIG.output_dir, selected_project or "")
 
 
 def _main() -> int:
