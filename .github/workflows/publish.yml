@@ -1,0 +1,75 @@
+name: publish
+
+# Publishes to PyPI when a GitHub release is published (tag vX.Y.Z matching
+# pyproject.toml). Uses PyPI trusted publishing: no API token is stored anywhere.
+# One-time setup is described in docs/RELEASING.md.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - name: Verify the release tag matches the package version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          package_version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          tag_version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          if package_version != tag_version:
+              raise SystemExit(f"release tag v{tag_version} does not match pyproject version {package_version}")
+          print(f"publishing lockkeeper {package_version}")
+          PY
+      - name: Run the test suite
+        shell: bash
+        run: |
+          HOME="$(mktemp -d)" PYTHONDONTWRITEBYTECODE=1 \
+            python -m unittest discover -s tests -p "test_*.py" -t .
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --quiet build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Smoke-test the wheel in a clean environment
+        shell: bash
+        run: |
+          python -m venv smoke
+          smoke/bin/python -m pip install --quiet dist/*.whl
+          HOME="$(mktemp -d)" smoke/bin/lockkeeper telemetry status
+          HOME="$(mktemp -d)" smoke/bin/lockkeeper hooks show claude
+          smoke/bin/lockkeeper-audit README.md --strict
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/lockkeeper/
+    permissions:
+      id-token: write # trusted publishing; granted to this job only
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

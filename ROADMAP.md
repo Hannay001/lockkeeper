@@ -100,7 +100,7 @@ the next feature release.
       installed from `@v1.1.2` and driven through doctor → snapshot-runtimes →
       rebuild → route plus the audit and hook firewall paths.
 
-## Unreleased — Freshness, scale, routing quality, MCP and pre-prompt routing (September 2026)
+## v1.2.0 — Freshness, scale, routing quality, MCP and pre-prompt routing (September 2026)
 
 - [x] Registry no longer goes stale on harness noise: config fingerprints are
       narrowed to the keys discovery reads (Claude project entries, Codex
@@ -135,12 +135,12 @@ the next feature release.
       no endpoint shipped yet.
 - Next: a keyword cache so re-indexing very large registries only re-reads
   changed skills (rebuild at 79k went 42 s → 100 s with body keywords).
-- Next: publish to PyPI (`pip install lockkeeper`; the name is free) with
-  trusted publishing from CI.
+- [x] PyPI publishing with trusted publishing from CI (`.github/workflows/publish.yml`,
+      docs/RELEASING.md); first upload happens with the v1.2.0 GitHub release.
 - Next: fine-tune a small reranker on labeled Lockkeeper routing tasks and
   promote it from shadow to rerank only when `eval_decision.py` shows a gain.
 
-## v1.2 — Pre-prompt activation and measurable context budgets
+## Next — Pre-prompt activation everywhere, and measurable context budgets
 
 The strongest launch signal was not “more skill storage.” It was that selection
 must happen **before the prompt** or the catalog simply becomes another pile.

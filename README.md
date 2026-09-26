@@ -11,7 +11,7 @@ Smaller context window, better tool choices, and no unvetted skill instructions 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 ![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 ![macOS, Linux, Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)
-[![MIT license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![MIT license](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE)
 
 [Quickstart](#quickstart) · [Ways to use it](#four-ways-to-use-lockkeeper) · [Benchmark](#proven-on-a-public-benchmark) · [Firewall](#prompt-injection-firewall-for-skills-and-mcp) · [FAQ](#faq) · [Docs](#documentation)
 
@@ -37,7 +37,7 @@ context savings: loaded 6 of 7,540 eligible capabilities (7,534 kept out of cont
 ```
 
 <p align="center">
-  <img src="docs/demo-route.png" alt="Lockkeeper routing a payment-webhook audit task to two primary skills in the terminal" width="72%">
+  <img src="https://raw.githubusercontent.com/Hannay001/lockkeeper/main/docs/demo-route.png" alt="Lockkeeper routing a payment-webhook audit task to two primary skills in the terminal" width="72%">
 </p>
 
 ## Why developers use Lockkeeper
@@ -57,7 +57,7 @@ git clone https://github.com/Hannay001/lockkeeper.git && cd lockkeeper
 ./install.sh          # puts `lockkeeper` on your PATH and connects every agent it finds
 ```
 
-<sub>Prefer not to use a terminal? Paste the prompt in [PROMPT.md](PROMPT.md) into the AI agent you already use; it installs and configures Lockkeeper for you. Or install with pip: `pip install git+https://github.com/Hannay001/lockkeeper.git`</sub>
+<sub>Prefer not to use a terminal? Paste the prompt in [PROMPT.md](https://github.com/Hannay001/lockkeeper/blob/main/PROMPT.md) into the AI agent you already use; it installs and configures Lockkeeper for you. Or install with pip: `pip install git+https://github.com/Hannay001/lockkeeper.git`</sub>
 
 **2. Index what you have installed:**
 
@@ -143,7 +143,7 @@ Routing claims should be measurable. Lockkeeper is tested against **SkillRouter 
 | Needed skills included in the routed set (79k) | 20.6% | **41.7%** |
 | Time to route a ~180-word task, 26k skills | 6.5 s | **0.7 s** |
 
-On the full pool, Lockkeeper's standard-library ranker scores between the paper's general-purpose embedding models (Qwen3-Embedding-0.6B at 53.3%, Gemini embedding at 56.0%) and roughly double its BM25 keyword baseline (28.0%), without loading a model. Methods, per-change results and caveats: **[docs/BENCHMARK.md](docs/BENCHMARK.md)**.
+On the full pool, Lockkeeper's standard-library ranker scores between the paper's general-purpose embedding models (Qwen3-Embedding-0.6B at 53.3%, Gemini embedding at 56.0%) and roughly double its BM25 keyword baseline (28.0%), without loading a model. Methods, per-change results and caveats: **[docs/BENCHMARK.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/BENCHMARK.md)**.
 
 Reproduce it yourself (downloads the ~400 MB dataset once):
 
@@ -173,7 +173,7 @@ flowchart LR
 ## Prompt-injection firewall for skills and MCP
 
 <p align="center">
-  <img src="docs/demo-audit.png" alt="Lockkeeper audit flagging a skill as hostile for an instruction override and a data-exfiltration pipeline" width="72%">
+  <img src="https://raw.githubusercontent.com/Hannay001/lockkeeper/main/docs/demo-audit.png" alt="Lockkeeper audit flagging a skill as hostile for an instruction override and a data-exfiltration pipeline" width="72%">
 </p>
 
 Skills and plugins are instructions your agent follows. Lockkeeper's scanner finds text that tries to override the agent, commands that send secrets or files to the network, credential-store access, code that decodes and runs hidden payloads, destructive commands, and invisible Unicode, across Markdown, configs and scripts.
@@ -183,7 +183,7 @@ Skills and plugins are instructions your agent follows. Lockkeeper's scanner fin
 - **Evidence:** signed receipts prove what was scanned and that results weren't altered.
 - **Optional:** dependency CVE checks against osv.dev, and a second-pass LLM review.
 
-Full details: **[docs/FIREWALL.md](docs/FIREWALL.md)**.
+Full details: **[docs/FIREWALL.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/FIREWALL.md)**.
 
 ## How Lockkeeper compares
 
@@ -205,13 +205,13 @@ Keep your everyday skills where Claude Code loads them, and put the large collec
 Both ways. It indexes the MCP servers and tools your agents have configured and routes to them, and it is itself an MCP server (`lockkeeper mcp`) that Codex, Cursor, Windsurf, Cline and other clients can call.
 
 ### How do I check a skill from GitHub for prompt injection before installing it?
-Run `lockkeeper audit path/to/skill --recursive --strict`. A `hostile` verdict (exit code 2) means don't install it. See [docs/FIREWALL.md](docs/FIREWALL.md).
+Run `lockkeeper audit path/to/skill --recursive --strict`. A `hostile` verdict (exit code 2) means don't install it. See [docs/FIREWALL.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/FIREWALL.md).
 
 ### Does Lockkeeper send my prompts or code anywhere?
 No. Routing, indexing and auditing run locally. The only network features are opt-in: the osv.dev dependency check, the LLM scan, remote decision providers, and the optional embedding sidecar, which downloads its model once.
 
 ### Is there telemetry?
-Only if you opt in with `lockkeeper telemetry on`. It shares anonymous daily counts (which commands ran and how fast), never prompts, skill names or file paths, and `DO_NOT_TRACK=1` always turns it off. See [docs/TELEMETRY.md](docs/TELEMETRY.md).
+Only if you opt in with `lockkeeper telemetry on`. It shares anonymous daily counts (which commands ran and how fast), never prompts, skill names or file paths, and `DO_NOT_TRACK=1` always turns it off. See [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
 
 ### Do I need a GPU, an API key or an embedding model?
 No. The core uses only the Python standard library. Embeddings and decision models are optional add-ons.
@@ -226,12 +226,12 @@ Measure it: `scripts/bench_routing.py` runs the public benchmark, and `scripts/e
 
 | Guide | What's in it |
 |---|---|
-| [Configuration](docs/CONFIGURATION.md) | All commands, projects and policy packs, freshness, long prompts, hooks, MCP, optional models |
-| [Firewall](docs/FIREWALL.md) | What the scanner detects, verdicts, receipts, live hooks |
-| [Benchmark](docs/BENCHMARK.md) | Methods, full results, comparison with published routers, caveats |
-| [Telemetry](docs/TELEMETRY.md) | Exactly what opt-in telemetry collects, and how to turn it off |
-| [Architecture](docs/ARCHITECTURE.md) | How the index, router and firewall fit together |
-| [Roadmap](ROADMAP.md) | What's shipped and what's next |
+| [Configuration](https://github.com/Hannay001/lockkeeper/blob/main/docs/CONFIGURATION.md) | All commands, projects and policy packs, freshness, long prompts, hooks, MCP, optional models |
+| [Firewall](https://github.com/Hannay001/lockkeeper/blob/main/docs/FIREWALL.md) | What the scanner detects, verdicts, receipts, live hooks |
+| [Benchmark](https://github.com/Hannay001/lockkeeper/blob/main/docs/BENCHMARK.md) | Methods, full results, comparison with published routers, caveats |
+| [Telemetry](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md) | Exactly what opt-in telemetry collects, and how to turn it off |
+| [Architecture](https://github.com/Hannay001/lockkeeper/blob/main/docs/ARCHITECTURE.md) | How the index, router and firewall fit together |
+| [Roadmap](https://github.com/Hannay001/lockkeeper/blob/main/ROADMAP.md) | What's shipped and what's next |
 
 ## Contributing
 
@@ -241,13 +241,13 @@ Issues, ideas and pull requests are welcome. To run the tests:
 HOME="$(mktemp -d)" python3 -m unittest discover -s tests -p "test_*.py" -t .
 ```
 
-Found a security issue or a way past the firewall? Please report it privately per [SECURITY.md](SECURITY.md).
+Found a security issue or a way past the firewall? Please report it privately per [SECURITY.md](https://github.com/Hannay001/lockkeeper/blob/main/SECURITY.md).
 
 ---
 
 <div align="center">
 
-Built and maintained by **[Himanshu (@Hannay001)](https://github.com/Hannay001)** · [MIT License](LICENSE)
+Built and maintained by **[Himanshu (@Hannay001)](https://github.com/Hannay001)** · [MIT License](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE)
 
 **If Lockkeeper saves you context or catches something nasty, a ⭐ helps other developers find it.**
 
