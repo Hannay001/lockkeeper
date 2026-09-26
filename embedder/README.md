@@ -14,6 +14,8 @@ For source installs, Lockkeeper atomically refreshes the generated `embed.py` fr
 checked-out repository before every query or reindex. If a sandbox blocks that shared-file
 write, it executes the current repository copy directly instead of falling back to stale code.
 
-`rebuild` and query auto-heal keep the index fingerprint current. The router degrades to
+`rebuild` and query auto-heal keep the index fingerprint current. Index files are written
+atomically, so an interrupted reindex never leaves torn vectors behind. A multi-intent route
+embeds the task and all its intents in one sidecar call (`query --batch`). The router degrades to
 lexical-only, with an operator-visible warning, if the sidecar is missing, stale, crashed, or
 hanging.

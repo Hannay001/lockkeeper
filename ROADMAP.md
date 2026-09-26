@@ -100,6 +100,28 @@ the next feature release.
       installed from `@v1.1.2` and driven through doctor → snapshot-runtimes →
       rebuild → route plus the audit and hook firewall paths.
 
+## Unreleased — Freshness, scale, and decision providers (September 2026 audit)
+
+- [x] Registry no longer goes stale on harness noise: config fingerprints are
+      narrowed to the keys discovery reads (Claude project entries, Codex
+      project trust and model changes, and unrelated settings are ignored).
+- [x] Queries notice installed, removed, moved, or updated skills, agents,
+      commands, and plugin versions through a cheap discovery watch, and repair
+      themselves with a plain rebuild. Harness snapshots are re-captured only
+      for real config drift, under a time budget, and a slow CLI degrades
+      instead of failing the query.
+- [x] Routing at 26k capabilities: 42s → 1s per route, 51s → 14s per rebuild.
+- [x] Firewall fail-open fixes: unscanned script types, symlink escapes,
+      hook JSON-escaping evasions, a hook crash on deep JSON, LLM-pass verdict
+      downgrades, and config typos that disabled the live hook.
+- [x] Optional decision-provider stage (Laya / Jev / cross-encoder) with
+      shadow mode and an evaluation harness.
+- [x] Resource corpora: large reference collections route as one capability
+      with top-k shard resources.
+- Next: fine-tune a Laya (or cross-encoder) checkpoint on labeled
+  Lockkeeper routing tasks, and promote it from shadow to rerank only when
+  `eval_decision.py` shows a gain.
+
 ## v1.2 — Pre-prompt activation and measurable context budgets
 
 The strongest launch signal was not “more skill storage.” It was that selection
@@ -156,8 +178,9 @@ malformed npm-manifest crashes, and stale package version metadata.
 
 Deferred (documented design limits / tuning):
 - Router ranking: grow alias coverage beyond ~8% of records; add a
-  low-confidence floor for generic-term winners; recalibrate the semantic
-  admit threshold against real queries; intent-modifier features.
+  low-confidence floor for generic-term winners (the decision provider's
+  clarification signal is a first step); recalibrate the semantic admit
+  threshold against real queries; intent-modifier features.
 - Evasion surface: paraphrased instruction overrides, multi-line command
   continuations, base64/openssl without a pipe, fullwidth-Latin homoglyphs.
 - Local-trust hardening: prefer absolute harness CLI paths over PATH
