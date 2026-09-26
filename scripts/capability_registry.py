@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Union
 
 from router_config import RouterConfig, RouterConfigError, load_router_config, split_project_argument
+import decision_provider
 
 
 ROUTER_CONFIG: RouterConfig
@@ -4358,11 +4359,18 @@ def bundle(
     output: Path,
     estimate_savings: bool = False,
     verify_sources: bool = False,
+    decision: Optional[decision_provider.DecisionRun] = None,
 ) -> dict[str, Any]:
     """Select a bounded, lane-structured portfolio for one task.
 
     verify_sources=True is for records loaded with load_registry(verify_sources=False):
     each selected row's source is checked before its load_path is handed out.
+
+    decision, when given, judges the top of the ranking (only rows this project
+    may use) and its probabilities are blended into the scores before lanes are
+    filled. Every policy below -- eligibility, deny rules, required lanes,
+    runtime access, the portfolio cap -- still decides; a failed or abstaining
+    provider leaves the ranking untouched.
     """
     ensure_router_config_valid()
     pack = policy_pack_for(project)
@@ -4372,6 +4380,20 @@ def bundle(
         # ranked_records() calls below then read the memoized results.
         semantic_hits_many(output, [query, *intents], registry_manifest_fingerprint(str(output)), runtime)
     ranked = ranked_records(records, query, runtime, output)
+    decision_scores: dict[str, float] = {}
+    if decision is not None:
+        decision_scores = decision(
+            ranked,
+            lambda record: not policy_denies(pack, record)
+            and (not verify_sources or record_source_is_trusted(record)),
+        )
+        ranked = decision_provider.blend(ranked, decision_scores, decision.settings.weight)
+
+    def rank(text: str) -> list[tuple[float, dict[str, Any]]]:
+        ordered = ranked_records(records, text, runtime, output)
+        if decision_scores and decision is not None:
+            ordered = decision_provider.blend(ordered, decision_scores, decision.settings.weight)
+        return ordered
     selected: list[dict[str, Any]] = []
 
     def semantic_key_for(record: dict[str, Any]) -> tuple[str, str]:
@@ -4614,7 +4636,7 @@ def bundle(
     # second intent unrepresentable no matter how well it scored.
     primary_cap = min(2 * len(intents), 4) if intents else 2
     for intent in intents:
-        for score, record in ranked_records(records, intent, runtime, output):
+        for score, record in rank(intent):
             if record["type"] not in {"skill", "entrypoint", "agent", "command"}:
                 continue
             if primary_added >= primary_cap:
@@ -4813,6 +4835,26 @@ def bundle(
     }
 
 
+def _decision_lines(decision: dict[str, Any]) -> list[str]:
+    via = decision["provider"] + (f" ({decision['model']})" if decision.get("model") else "")
+    if decision.get("error"):
+        return [f"decision: {decision['mode']} via {via} unavailable ({decision['error']}); routing unchanged"]
+    lines = [
+        f"decision: {decision['mode']} via {via}, {decision['shortlist']} candidates judged "
+        f"in {decision['latency_ms']:.0f} ms" + ("" if decision.get("applied") else "; scores flat, ranking unchanged")
+    ]
+    comparison = decision.get("comparison")
+    if comparison:
+        lines.append(
+            f"  shadow agreement: {comparison['shared']} of {comparison['baseline']} shared"
+            + (f"; would add {', '.join(comparison['would_add'])}" if comparison["would_add"] else "")
+            + (f"; would drop {', '.join(comparison['would_drop'])}" if comparison["would_drop"] else "")
+        )
+    if decision.get("clarification") is not None and decision["clarification"] >= decision_provider.CLARIFICATION_THRESHOLD:
+        lines.append(f"  task may be underspecified (p={decision['clarification']:.2f})")
+    return lines
+
+
 def emit_bundle(result: dict[str, Any], as_json: bool) -> None:
     if as_json:
         print(json.dumps(result, indent=2, ensure_ascii=True))
@@ -4845,7 +4887,85 @@ def emit_bundle(result: dict[str, Any], as_json: bool) -> None:
                 f"(est. @ {savings['bytes_per_token']} B/tok)"
             )
         print(line)
+    if result.get("decision"):
+        for line in _decision_lines(result["decision"]):
+            print(clean_text(line, 600))
     print(f"artifacts: {result['artifacts']['index']}")
+
+
+def decision_settings(mode_override: Optional[str]) -> decision_provider.DecisionSettings:
+    try:
+        return decision_provider.with_mode(
+            decision_provider.parse_settings(ROUTER_CONFIG.get_extension("decision")), mode_override
+        )
+    except decision_provider.DecisionConfigError as error:
+        raise RuntimeError(str(error)) from error
+
+
+def decision_sidecar_script() -> Path:
+    """decision/decide.py from the checkout, else from the installed wheel."""
+    checkout = _router_root() / "decision" / "decide.py"
+    if checkout.is_file():
+        return checkout
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("lockkeeper_decision.decide")
+    except (ImportError, AttributeError, ValueError):
+        spec = None
+    return Path(spec.origin) if spec is not None and spec.origin else checkout
+
+
+def route_with_decision(
+    records: list[dict[str, Any]],
+    query: str,
+    runtime: str,
+    project: str,
+    max_count: int,
+    output: Path,
+    *,
+    settings: decision_provider.DecisionSettings,
+    estimate_savings: bool = False,
+    verify_sources: bool = False,
+) -> dict[str, Any]:
+    """bundle(), plus the optional decision stage in shadow or rerank mode.
+
+    shadow: the returned bundle is exactly what routing produces without a
+    provider; the provider's alternative is attached for comparison only.
+    rerank: the provider's evidence is blended into the ranking that fills the
+    lanes. With the provider off this is bundle() unchanged.
+    """
+    common = dict(estimate_savings=estimate_savings, verify_sources=verify_sources)
+    if not settings.enabled:
+        return bundle(records, query, runtime, project, max_count, output, **common)
+    try:
+        provider = decision_provider.make_provider(settings, output=output, sidecar_script=decision_sidecar_script())
+    except decision_provider.DecisionConfigError as error:
+        result = bundle(records, query, runtime, project, max_count, output, **common)
+        result["decision"] = {
+            "mode": settings.mode, "provider": settings.provider, "model": settings.model or None,
+            "latency_ms": 0.0, "shortlist": 0, "applied": False, "error": str(error), "clarification": None,
+        }
+        return result
+    run = decision_provider.DecisionRun(provider, settings, query)
+    if settings.mode == "rerank":
+        result = bundle(records, query, runtime, project, max_count, output, decision=run, **common)
+        result["decision"] = run.report("rerank")
+        clarification = result["decision"].get("clarification")
+        if clarification is not None and clarification >= decision_provider.CLARIFICATION_THRESHOLD:
+            result.setdefault("next_actions", []).insert(
+                0, "The task looks underspecified: ask the user a clarifying question before loading capabilities."
+            )
+        return result
+    result = bundle(records, query, runtime, project, max_count, output, **common)
+    shadow = bundle(records, query, runtime, project, max_count, output, decision=run, **common)
+    report = run.report("shadow")
+    report["bundle"] = [
+        {"lane": item["lane"], "type": item["type"], "name": item["name"]} for item in shadow.get("bundle", [])
+    ]
+    report["comparison"] = decision_provider.compare_bundles(result.get("bundle", []), shadow.get("bundle", []))
+    result["decision"] = report
+    return result
 
 
 class RegistryArgumentParser(argparse.ArgumentParser):
@@ -5562,6 +5682,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="estimate_savings",
         help="Estimate body tokens kept out of context (stats every eligible skill body; adds latency)",
     )
+    bundle_parser.add_argument(
+        "--decision",
+        choices=list(decision_provider.MODES),
+        help=(
+            "Decision-provider stage (configured in [extensions.decision]): shadow reports the "
+            "provider's alternative next to the normal route; rerank blends it into ranking; off disables"
+        ),
+    )
     bundle_parser.add_argument("--json", action="store_true")
 
     check_parser = subparsers.add_parser("check", help="Verify inventory completeness and generated artifacts")
@@ -5798,16 +5926,18 @@ def main() -> int:
                     raise RuntimeError(
                         f"unknown project {args.project!r}; configured projects: {listing}"
                     )
+            settings = decision_settings(getattr(args, "decision", None))
             records = ensure_query_registry_fresh(output)
             if records is None:
                 records = load_registry(output, verify_sources=False)
-            result = bundle(
+            result = route_with_decision(
                 records,
                 query,
                 args.runtime,
                 project,
                 args.max_count,
                 output,
+                settings=settings,
                 estimate_savings=getattr(args, "estimate_savings", False),
                 verify_sources=True,
             )
