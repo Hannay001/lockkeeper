@@ -85,5 +85,29 @@ class RuntimeAwareSemanticHitsTest(unittest.TestCase):
         self.assertEqual(len(hits), 4, "both eligible runtime registrations receive the group score")
 
 
+class AtomicIndexWriteTest(unittest.TestCase):
+    """An interrupted reindex must never leave a torn vectors/metadata pair."""
+
+    def test_replace_is_all_or_nothing_and_leaves_no_temp_files(self) -> None:
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            target = directory / "embeddings.bin"
+            target.write_bytes(b"old-vectors")
+
+            with mock.patch.object(os, "replace", side_effect=OSError("killed")):
+                with self.assertRaises(OSError):
+                    embedder._atomic_write_bytes(target, b"new-vectors-partially-written")
+            self.assertEqual(target.read_bytes(), b"old-vectors")
+            self.assertEqual(sorted(path.name for path in directory.iterdir()), ["embeddings.bin"])
+
+            embedder._atomic_write_bytes(target, b"new-vectors")
+            self.assertEqual(target.read_bytes(), b"new-vectors")
+            self.assertEqual(sorted(path.name for path in directory.iterdir()), ["embeddings.bin"])
+
+
 if __name__ == "__main__":
     unittest.main()

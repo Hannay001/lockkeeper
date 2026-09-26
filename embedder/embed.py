@@ -65,6 +65,30 @@ DIM = 384
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Write via a sibling temp file + os.replace so readers never see a torn file.
+
+    The router bounds auto-heal reindexing with a timeout and kills the sidecar
+    when it expires; a direct write interrupted there left embeddings.bin with a
+    different row count than embeddings.json, and every later query failed to
+    reshape it and silently scored lexical-only.
+    """
+    import os
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False)
+    temp = Path(handle.name)
+    try:
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
 def _load_model():
     from fastembed import TextEmbedding
 
@@ -159,7 +183,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         for row, i in zip(fresh, to_embed, strict=True):
             vectors[i] = row
 
-    (out / "embeddings.bin").write_bytes(vectors.tobytes())
+    # Vectors first, metadata last: the metadata's registry_fingerprint is what
+    # declares the pair current, so it must never point at vectors not yet on disk.
+    _atomic_write_bytes(out / "embeddings.bin", vectors.tobytes())
     meta = {
         "schema_version": SCHEMA_VERSION,
         "model": MODEL_NAME,
@@ -169,7 +195,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         "hashes": hashes,
         "registry_fingerprint": args.fingerprint or "",
     }
-    (out / "embeddings.json").write_text(json.dumps(meta), encoding="utf-8")
+    _atomic_write_bytes(out / "embeddings.json", json.dumps(meta).encode("utf-8"))
     reused = len(rankable) - len(to_embed)
     print(
         f"status: success\n"
