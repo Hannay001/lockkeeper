@@ -271,6 +271,48 @@ class DiscoveryWatchTest(FreshnessFixture):
         (scripts / "helper.py").write_text("print('x')\n", encoding="utf-8")
         self.assert_fresh()
 
+    def test_future_mtimes_do_not_cause_a_rebuild_loop(self) -> None:
+        """Archives from a machine with a fast clock carry future directory mtimes."""
+        future = time.time_ns() + 86_400 * 1_000_000_000
+        self.build()
+        os.utime(self.skills / "engineering", ns=(future, future))
+        registry.rebuild(self.output, quiet=True)
+        self.assert_fresh()
+
+    def test_a_directory_changed_during_the_rebuild_forces_another_pass(self) -> None:
+        self.build()
+        real_collect = registry.collect_registry
+
+        def collect_then_install(output):
+            result = real_collect(output)
+            self.write_skill(self.skills / "engineering" / "late-arrival", "late-arrival", "installed mid-rebuild")
+            return result
+
+        with mock.patch.object(registry, "collect_registry", side_effect=collect_then_install):
+            registry.rebuild(self.output, quiet=True)
+        self.assert_stale("Registry skill discovery is stale")
+
+    def test_a_concurrent_install_during_self_heal_does_not_fail_the_query(self) -> None:
+        self.build()
+        self.write_skill(self.skills / "engineering" / "rate-limiter", "rate-limiter", "rest rate limiting")
+        real_collect = registry.collect_registry
+
+        def collect_then_install(output):
+            result = real_collect(output)
+            self.write_skill(self.skills / "engineering" / "late-arrival", "late-arrival", "installed mid-heal")
+            return result
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(registry, "collect_registry", side_effect=collect_then_install),
+            contextlib.redirect_stderr(stderr),
+        ):
+            records = registry.ensure_query_registry_fresh(self.output)
+        self.assertIn("rate-limiter", {record["name"] for record in records})
+        self.assertIn("next route will pick up the rest", stderr.getvalue())
+        records = registry.ensure_query_registry_fresh(self.output)
+        self.assertIn("late-arrival", {record["name"] for record in records})
+
     def test_a_manifest_from_an_older_router_is_repaired_by_rebuild_alone(self) -> None:
         self.build()
         manifest_path = self.output / "manifest.json"

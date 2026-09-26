@@ -3058,16 +3058,49 @@ def discovery_watch_paths(registrations: Iterable[dict[str, Any]], output: Path)
     return sorted(watched)
 
 
-def discovery_signature(paths: Iterable[str], changed_since_ns: Optional[int] = None) -> str:
+# File timestamps come from a coarse kernel clock that can trail time.time_ns()
+# by a scheduler tick, so "modified after the rebuild started" needs slack.
+DISCOVERY_CLOCK_SLACK_NS = 20_000_000
+
+
+def watched_mtimes(paths: Iterable[str]) -> dict[str, int]:
+    mtimes: dict[str, int] = {}
+    for text in paths:
+        try:
+            mtimes[text] = os.stat(text).st_mtime_ns
+        except OSError:
+            continue
+    return mtimes
+
+
+def discovery_signature(
+    paths: Iterable[str],
+    rebuild_window: Optional[tuple[int, int]] = None,
+    before: Optional[dict[str, int]] = None,
+) -> str:
+    """Digest of the watched paths' mtimes.
+
+    During a rebuild, a directory that changed while discovery was walking is
+    recorded as CHANGED_DURING_REBUILD, which forces one more rediscovery on the
+    next query instead of trusting a walk that may have missed the change. Two
+    signals: for a directory stat'ed just before the walk (`before`), its mtime
+    moved -- exact, no clock involved; for a directory new to the watch list,
+    its mtime falls inside `rebuild_window`. Only the window counts, never
+    "newer than start": a FUTURE mtime (an archive made on a machine with a
+    fast clock) must not be flagged on every rebuild, or every query would
+    rebuild forever.
+    """
     digest = hashlib.sha256(f"discovery-watch-v{DISCOVERY_WATCH_VERSION}\0".encode("ascii"))
     for text in paths:
         try:
             mtime = os.stat(text).st_mtime_ns
-            state = (
-                CHANGED_DURING_REBUILD
-                if changed_since_ns is not None and mtime >= changed_since_ns
-                else str(mtime)
-            )
+            if before is not None and text in before:
+                # Stat'ed just before the walk: exact, no clock involved.
+                moved, in_window = before[text] != mtime, False
+            else:
+                moved = False
+                in_window = rebuild_window is not None and rebuild_window[0] <= mtime <= rebuild_window[1]
+            state = CHANGED_DURING_REBUILD if moved or in_window else str(mtime)
         except OSError:
             state = "missing"
         digest.update(f"{text}\0{state}\n".encode("utf-8", errors="replace"))
@@ -3157,6 +3190,14 @@ def rebuild(output: Path, quiet: bool = False) -> dict[str, Any]:
 
 
 def _rebuild_locked(output: Path, quiet: bool) -> dict[str, Any]:
+    previous_watch = load_json(output / "manifest.json").get("discovery_watch")
+    previous_paths = previous_watch.get("paths") if isinstance(previous_watch, dict) else None
+    before = watched_mtimes(
+        [
+            *(item for item in (previous_paths if isinstance(previous_paths, list) else []) if isinstance(item, str)),
+            *(str(root) for root in discovery_roots()),
+        ]
+    )
     started_ns = time.time_ns()
     records, registrations, legacy = collect_registry(output)
     manifest = build_manifest(records, registrations)
@@ -3164,7 +3205,11 @@ def _rebuild_locked(output: Path, quiet: bool) -> dict[str, Any]:
     manifest["discovery_watch"] = {
         "version": DISCOVERY_WATCH_VERSION,
         "paths": watch_paths,
-        "signature": discovery_signature(watch_paths, changed_since_ns=started_ns),
+        "signature": discovery_signature(
+            watch_paths,
+            rebuild_window=(started_ns - DISCOVERY_CLOCK_SLACK_NS, time.time_ns()),
+            before=before,
+        ),
     }
     files_by_category = render_category_files(output, records)
     manifest["category_files"] = files_by_category
@@ -3498,7 +3543,19 @@ def ensure_query_registry_fresh(output: Path) -> Optional[list[dict[str, Any]]]:
                 semantic_restored = reindex_semantic(
                     output, quiet=True, timeout=SEMANTIC_AUTOHEAL_TIMEOUT_SECONDS
                 )
-            records = assert_registry_fresh(output, deep=False)
+            try:
+                records = assert_registry_fresh(output, deep=False)
+            except RuntimeError as recheck_error:
+                if not str(recheck_error).startswith("Registry skill discovery is stale:"):
+                    raise
+                # Capabilities changed on disk while this rebuild ran (an install
+                # in progress). The index just built is the best available; the
+                # next query rediscovers again instead of this one failing.
+                _warn_once(
+                    "capability folders changed while the registry was being refreshed; "
+                    "serving the refreshed index, the next route will pick up the rest"
+                )
+                records = load_registry(output, verify_sources=False)
             # Only a sidecar that is actually installed can have been degraded;
             # a lexical-only deployment has nothing to restore.
             if not semantic_restored and semantic_interpreter(output).is_file():
