@@ -156,6 +156,11 @@ class ResourceCorpus:
 
 
 RESOURCE_CORPORA: tuple[ResourceCorpus, ...] = ()
+# Optional per-deployment migration list: MCP server names that should be
+# treated as retired (excluded from discovery and flagged by `lockkeeper check`).
+# Populate via config [extensions] legacy_mcp_names = ["..."]; configure_router()
+# fills it at import, so it must be defined before that call, never after.
+LEGACY_MCP_NAMES: frozenset[str] = frozenset()
 RESOURCE_TOP_K = 5
 
 
@@ -385,10 +390,6 @@ AUTO_REFRESHABLE_STALENESS = (
 # Populate via a policy pack or by extending this mapping downstream.
 PINNED_SKILL_PATHS: dict[str, Path] = {}
 
-# Optional per-deployment migration list: MCP server names that should be
-# treated as retired (excluded from discovery and flagged by `lockkeeper check`).
-# Populate via config [extensions] legacy_mcp_names = ["..."].
-LEGACY_MCP_NAMES: frozenset[str] = frozenset()
 SKIP_DIRS = {
     ".git",
     ".hg",

@@ -8,6 +8,7 @@ artifacts.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -353,3 +354,28 @@ class IsolatedRouterConfigTest(unittest.TestCase):
             {("phase-a-first", str(first)), ("phase-a-second", str(second))},
         )
         self.assertEqual(config.mcp_config_paths, (first, second))
+
+
+class ImportTimeExtensionsTest(unittest.TestCase):
+    """Extensions applied while the module imports must survive the rest of the import."""
+
+    def test_configured_legacy_mcp_names_survive_import(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="lockkeeper-legacy-") as directory:
+            config = Path(directory) / "legacy.toml"
+            config.write_text('[extensions]\nlegacy_mcp_names = ["Retired-Server"]\n', encoding="utf-8")
+            environment = {**os.environ, "CAPABILITY_ROUTER_CONFIG": str(config), "HOME": directory}
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import capability_registry as r; print(sorted(r.LEGACY_MCP_NAMES))",
+                ],
+                cwd=REPOSITORY_ROOT / "scripts",
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertEqual(probe.stdout.strip(), "['retired-server']")
