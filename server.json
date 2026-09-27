@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Hannay001/lockkeeper",
+  "title": "Lockkeeper",
+  "description": "Routes each task to the few skills, MCP servers and tools that fit it.",
+  "repository": {
+    "url": "https://github.com/Hannay001/lockkeeper",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/Hannay001/lockkeeper",
+  "version": "1.4.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "lockkeeper",
+      "version": "1.4.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

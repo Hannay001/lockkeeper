@@ -30,7 +30,9 @@ project page appears at <https://pypi.org/project/lockkeeper/>.
 
 ## Each release
 
-1. Bump `version` in `pyproject.toml` and add a `## X.Y.Z — date` section to
+1. Bump the version in `pyproject.toml`, `plugins/lockkeeper/.claude-plugin/plugin.json`,
+   `.claude-plugin/marketplace.json` and `server.json` (a test fails if they differ),
+   and add a `## X.Y.Z — date` section to
    [CHANGELOG.md](../CHANGELOG.md). Merge that to `main`.
 2. Open *Actions → publish → Run workflow* and enter the version, for example
    `1.2.0`. Leave *commit* empty to release the latest `main`, or give the full SHA
@@ -51,6 +53,12 @@ project page appears at <https://pypi.org/project/lockkeeper/>.
    pipx install lockkeeper       # or: pip install lockkeeper
    lockkeeper doctor
    ```
+
+After the PyPI upload, the workflow also lists the version in the official
+[MCP Registry](https://registry.modelcontextprotocol.io) as
+`io.github.Hannay001/lockkeeper`. It signs in with GitHub OIDC, so there is no secret
+to store; the registry checks the `mcp-name:` line in `README.md` against the PyPI
+package, so keep that line.
 
 You can also publish a GitHub release by hand (tag `vX.Y.Z` on `main`); the same
 workflow then builds, tests and uploads that tag to PyPI.

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "lockkeeper",
+  "description": "Lockkeeper for Claude Code: skill routing on every prompt, an MCP server, and a prompt-injection firewall.",
+  "owner": {
+    "name": "Himanshu",
+    "url": "https://github.com/Hannay001"
+  },
+  "plugins": [
+    {
+      "name": "lockkeeper",
+      "source": "./plugins/lockkeeper",
+      "description": "Every prompt arrives with the few installed skills, MCP servers and tools that fit it; plus a prompt-injection firewall. Needs `pipx install lockkeeper`.",
+      "version": "1.4.0"
+    }
+  ]
+}

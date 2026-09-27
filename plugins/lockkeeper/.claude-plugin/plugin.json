@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "lockkeeper",
+  "version": "1.4.0",
+  "description": "Skill router and prompt-injection firewall: every prompt arrives with the few installed skills, MCP servers and tools that fit it, instead of all of them. Needs `pipx install lockkeeper`.",
+  "author": {
+    "name": "Himanshu",
+    "url": "https://github.com/Hannay001"
+  },
+  "homepage": "https://github.com/Hannay001/lockkeeper",
+  "repository": "https://github.com/Hannay001/lockkeeper",
+  "license": "FSL-1.1-ALv2",
+  "keywords": ["skills", "router", "context-window", "mcp", "prompt-injection", "security"],
+  "skills": [
+    "./skills/"
+  ]
+}

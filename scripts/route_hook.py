@@ -139,6 +139,19 @@ FIREWALL_HOOK_EVENT = "PreToolUse"
 HOOK_TIMEOUT_SECONDS = 15
 
 
+def plugin_enabled(settings: Path) -> bool:
+    """True when the Lockkeeper Claude Code plugin (plugins/lockkeeper) is enabled in `settings`,
+    which already routes every prompt."""
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    enabled = data.get("enabledPlugins") if isinstance(data, dict) else None
+    return isinstance(enabled, dict) and any(
+        str(plugin).split("@")[0] == "lockkeeper" and value is True for plugin, value in enabled.items()
+    )
+
+
 def claude_settings_path(scope: str) -> Path:
     return (Path.home() if scope == "user" else Path.cwd()) / ".claude" / "settings.json"
 
@@ -278,6 +291,9 @@ def setup_cli(argv: list[str]) -> int:
                   file=sys.stderr)
             return 0
         if args.action == "install":
+            if any(plugin_enabled(claude_settings_path(scope)) for scope in ("user", "project")):
+                print("note: the Lockkeeper Claude Code plugin is enabled and already routes every prompt; "
+                      "with this hook too, prompts would be routed twice. Remove one of them.")
             added = install(path, args.firewall)
             print(f"{path}: " + (f"added {', '.join(added)}" if added else "already installed, nothing changed"))
             if added:

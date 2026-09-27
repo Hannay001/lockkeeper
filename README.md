@@ -63,7 +63,7 @@ pipx install lockkeeper     # or: pip install lockkeeper  ·  uv tool install lo
 lockkeeper init             # finds every AI agent on this machine and connects it
 ```
 
-<sub>Prefer not to use a terminal? Paste the prompt in [PROMPT.md](https://github.com/Hannay001/lockkeeper/blob/main/PROMPT.md) into the AI agent you already use; it installs and configures Lockkeeper for you. Working from source? `git clone https://github.com/Hannay001/lockkeeper.git && cd lockkeeper && ./install.sh`</sub>
+<sub>Only want the router skill? `npx skills add Hannay001/lockkeeper` installs it for any agent (it needs the `lockkeeper` command too). Prefer not to use a terminal? Paste the prompt in [PROMPT.md](https://github.com/Hannay001/lockkeeper/blob/main/PROMPT.md) into the AI agent you already use; it installs and configures Lockkeeper for you. Working from source? `git clone https://github.com/Hannay001/lockkeeper.git && cd lockkeeper && ./install.sh`</sub>
 
 **2. Index what you have installed:**
 
@@ -84,9 +84,14 @@ Then pick how your agent should use it, below.
 
 ### 1. Route every prompt automatically (Claude Code)
 
-```sh
-lockkeeper hooks install claude
+Install the Claude Code plugin (after `pipx install lockkeeper`). Inside Claude Code:
+
+```text
+/plugin marketplace add Hannay001/lockkeeper
+/plugin install lockkeeper@lockkeeper
 ```
+
+It adds the routing hook, the MCP server and the router skill in one step. Prefer settings files? `lockkeeper hooks install claude` adds just the hook (use one or the other, not both).
 
 Every prompt you send now reaches Claude Code with a short note naming the installed skills that fit it and the exact files to read. Slash commands and short replies like "thanks" pass through untouched, and the hook never blocks a prompt. Undo with `lockkeeper hooks remove claude`.
 
@@ -119,7 +124,7 @@ args = ["mcp", "--runtime", "codex"]
 { "mcpServers": { "lockkeeper": { "command": "lockkeeper", "args": ["mcp"] } } }
 ```
 
-<sub>The JSON form works for Cursor (`~/.cursor/mcp.json`), Windsurf, Cline and most other clients.</sub>
+<sub>The JSON form works for Cursor (`~/.cursor/mcp.json`), Windsurf, Cline and most other clients. Lockkeeper is also listed in the official MCP Registry (MCP Registry name: `mcp-name: io.github.Hannay001/lockkeeper`).</sub>
 
 ### 3. From the command line and scripts
 
