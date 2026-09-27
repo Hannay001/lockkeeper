@@ -1,12 +1,28 @@
 name: publish
 
-# Publishes to PyPI when a GitHub release is published (tag vX.Y.Z matching
-# pyproject.toml). Uses PyPI trusted publishing: no API token is stored anywhere.
-# One-time setup is described in docs/RELEASING.md.
+# Publishes to PyPI with trusted publishing: no API token is stored anywhere.
+# Two ways to release (one-time setup and steps: docs/RELEASING.md):
+#
+# - Actions > publish > Run workflow, with the version (and optionally the main
+#   commit to release). Builds and tests that commit, uploads to PyPI, then creates
+#   the vX.Y.Z tag and GitHub release, using that version's CHANGELOG.md section as
+#   the notes.
+# - Publish a GitHub release by hand (tag vX.Y.Z on main). Builds, tests and uploads
+#   that tag.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the v (must match pyproject.toml at that commit)"
+        required: true
+        type: string
+      commit:
+        description: "Full SHA of the main commit to release (default: the latest main)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -14,26 +30,65 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.target.outputs.version }}
+      commit: ${{ steps.target.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
-      - name: Verify the release tag matches the package version
+      - name: Verify what is being released
+        id: target
         shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
+          package_version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            wanted="$INPUT_VERSION"
+            if ! [[ "$wanted" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::version must look like 1.2.0, got '$wanted'"; exit 1
+            fi
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "::error::commit $(git rev-parse HEAD) is not on main"; exit 1
+            fi
+            if git rev-parse -q --verify "refs/tags/v$wanted" >/dev/null; then
+              echo "::error::tag v$wanted already exists; release a new version instead"; exit 1
+            fi
+          else
+            wanted="${GITHUB_REF_NAME#v}"
+          fi
+          if [ "$package_version" != "$wanted" ]; then
+            echo "::error::release v$wanted does not match pyproject version $package_version"; exit 1
+          fi
+          echo "version=$wanted" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "publishing lockkeeper $wanted from $(git rev-parse --short HEAD)"
+      - name: Extract the release notes from CHANGELOG.md
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          mkdir -p release-notes
           python - <<'PY'
           import os
           import pathlib
-          import tomllib
+          import re
 
-          package_version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
-          tag_version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
-          if package_version != tag_version:
-              raise SystemExit(f"release tag v{tag_version} does not match pyproject version {package_version}")
-          print(f"publishing lockkeeper {package_version}")
+          version = os.environ["VERSION"]
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          section = re.search(rf"^## {re.escape(version)}\b[^\n]*\n(.*?)(?=^## |\Z)", changelog, re.S | re.M)
+          if section is None or not section.group(1).strip():
+              raise SystemExit(f"CHANGELOG.md has no '## {version}' section to use as release notes")
+          pathlib.Path("release-notes/notes.md").write_text(section.group(1).strip() + "\n", encoding="utf-8")
           PY
       - name: Run the test suite
         shell: bash
@@ -58,6 +113,12 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: release-notes
+          path: release-notes/
+          if-no-files-found: error
 
   publish:
     needs: build
@@ -73,3 +134,33 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  github-release:
+    # Only for Run workflow: a hand-published release already has its tag and notes.
+    # Runs after the PyPI upload, so a failed upload never leaves a tag behind.
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag and release; granted to this job only
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notes
+          path: release-notes/
+      - name: Create the tag and GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --target "$COMMIT" \
+            --title "Lockkeeper $VERSION" \
+            --notes-file release-notes/notes.md
