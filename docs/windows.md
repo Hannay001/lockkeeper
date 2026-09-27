@@ -29,6 +29,19 @@ NTFS junctions cannot substitute for symlinks here:
 - Developer Mode makes true symlinks available to ordinary users anyway, so
   there is no privilege problem left to work around.
 
+## Installing on Windows
+
+Install from PyPI, which puts a native `lockkeeper.exe` on your PATH:
+
+```powershell
+py -m pip install lockkeeper      # or: pipx install lockkeeper
+lockkeeper init
+lockkeeper snapshot-runtimes
+lockkeeper rebuild
+```
+
+The POSIX launcher and `install.sh` below are only for working from a clone.
+
 ## POSIX-only launcher and installer
 
 The `scripts/capability-registry` sh launcher uses POSIX `exec` semantics and

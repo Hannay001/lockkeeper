@@ -12,6 +12,7 @@
 Give **Claude Code, Codex, Cursor** and other AI agents the few skills, MCP servers and tools that fit each task, instead of all of them.<br>
 Smaller context window, better tool choices, and no unvetted skill instructions reaching your agent.
 
+[![PyPI](https://img.shields.io/pypi/v/lockkeeper.svg)](https://pypi.org/project/lockkeeper/)
 [![tests](https://github.com/Hannay001/lockkeeper/actions/workflows/tests.yml/badge.svg)](https://github.com/Hannay001/lockkeeper/actions/workflows/tests.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 ![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
@@ -55,20 +56,21 @@ context savings: loaded 6 of 7,540 eligible capabilities (7,534 kept out of cont
 
 ## Quickstart
 
-**1. Install** (Python 3.11+):
+**1. Install** from [PyPI](https://pypi.org/project/lockkeeper/) (Python 3.11+, macOS, Linux and Windows):
 
 ```sh
-git clone https://github.com/Hannay001/lockkeeper.git && cd lockkeeper
-./install.sh          # puts `lockkeeper` on your PATH and connects every agent it finds
+pipx install lockkeeper     # or: pip install lockkeeper  ·  uv tool install lockkeeper
+lockkeeper init             # finds every AI agent on this machine and connects it
 ```
 
-<sub>Prefer not to use a terminal? Paste the prompt in [PROMPT.md](https://github.com/Hannay001/lockkeeper/blob/main/PROMPT.md) into the AI agent you already use; it installs and configures Lockkeeper for you. Or install with pip: `pip install git+https://github.com/Hannay001/lockkeeper.git`</sub>
+<sub>Prefer not to use a terminal? Paste the prompt in [PROMPT.md](https://github.com/Hannay001/lockkeeper/blob/main/PROMPT.md) into the AI agent you already use; it installs and configures Lockkeeper for you. Working from source? `git clone https://github.com/Hannay001/lockkeeper.git && cd lockkeeper && ./install.sh`</sub>
 
 **2. Index what you have installed:**
 
 ```sh
+lockkeeper snapshot-runtimes   # records your agents' MCP servers and plugins
 lockkeeper rebuild
-lockkeeper doctor     # shows each agent found and how many skills it has
+lockkeeper doctor              # shows each agent found and how many skills it has
 ```
 
 **3. Route a task:**

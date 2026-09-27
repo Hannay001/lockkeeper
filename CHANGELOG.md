@@ -20,9 +20,20 @@ All notable changes to Lockkeeper. Versions follow [semantic versioning](https:/
   terminal, never in scripts or CI or when `DO_NOT_TRACK` is set, and never again once
   answered. It stays off until you say yes. See
   [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
+- The README, the one-prompt installer and the Windows notes install from PyPI
+  (`pipx install lockkeeper`), with a PyPI badge.
 - Releases run from *Actions → publish → Run workflow*: it uploads to PyPI, then
   creates the tag and GitHub release with the CHANGELOG notes. See
   [docs/RELEASING.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/RELEASING.md).
+
+### Fixed
+
+- A fresh `pip install lockkeeper` could not build its index: `rebuild` and `route`
+  failed with "Required runtime snapshot is missing" until `lockkeeper
+  snapshot-runtimes` was run (a git checkout hid it with seeded placeholders). They
+  now capture the agent inventories themselves, or start from empty ones if the
+  agents' CLIs fail. On 1.2.0, run `lockkeeper snapshot-runtimes` once first. CI now
+  installs the built package into a brand-new home and routes a task.
 
 ## 1.2.0 — 2026-09-26
 

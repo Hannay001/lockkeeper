@@ -112,3 +112,22 @@ jobs:
             exit 1
           fi
           echo "hostile fixture blocked as expected"
+      - name: A fresh install indexes and routes (the pip quickstart)
+        shell: bash
+        run: |
+          set -e
+          if [ -x smoke-venv/bin/lockkeeper ]; then LK="$PWD/smoke-venv/bin/lockkeeper"; else LK="$PWD/smoke-venv/Scripts/lockkeeper.exe"; fi
+          # A brand-new home with one skill and no snapshots, like `pip install` on a
+          # new machine. route must build the index itself; rebuild and search too.
+          FRESH="$(mktemp -d)"
+          mkdir -p "$FRESH/.claude/skills/pytest-writer"
+          printf -- '---\nname: pytest-writer\ndescription: Write unit tests for Python code with pytest.\n---\nUse pytest.\n' \
+            > "$FRESH/.claude/skills/pytest-writer/SKILL.md"
+          LK_HOME="$FRESH"
+          if command -v cygpath >/dev/null 2>&1; then LK_HOME="$(cygpath -w "$FRESH")"; fi
+          HOME="$LK_HOME" USERPROFILE="$LK_HOME" "$LK" route --runtime claude "write unit tests for a python data pipeline" > "$FRESH/route.txt"
+          cat "$FRESH/route.txt"
+          grep -q "skill:pytest-writer" "$FRESH/route.txt"
+          HOME="$LK_HOME" USERPROFILE="$LK_HOME" "$LK" rebuild > /dev/null
+          HOME="$LK_HOME" USERPROFILE="$LK_HOME" "$LK" search pytest | grep "skill:pytest-writer" > /dev/null
+          echo "fresh install routed, rebuilt and searched"
