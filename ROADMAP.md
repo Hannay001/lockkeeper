@@ -121,9 +121,10 @@ the next feature release.
 - [x] Public routing benchmark (`scripts/bench_routing.py`, docs/BENCHMARK.md) on
       SkillRouter Eval Core: 79,141 real skills, 75 SkillsBench tasks.
 - [x] Ranking quality: Hit@1 0.253 → 0.547 on the full 79k pool (0.347 → 0.653
-      at 26k), bundle recall 0.206 → 0.417 -- body keywords (tf-idf), graded
+      at 26k), bundle recall 0.206 → 0.521 -- body keywords (tf-idf), graded
       IDF, plural and umlaut matching, prompt tokenization, linear match
-      breadth, and namesake skills no longer hidden.
+      breadth, namesake skills no longer hidden, and bundles that fill to a
+      configurable size (10 by default).
 - [x] Long prompts route (clipped at 16k chars / 256 terms) instead of being
       refused above 64 words.
 - [x] Decision-provider blend reorders only its shortlist, on normalized
@@ -140,6 +141,15 @@ the next feature release.
 - Next: fine-tune a small reranker on labeled Lockkeeper routing tasks and
   promote it from shadow to rerank only when `eval_decision.py` shows a gain.
 
+## v1.3.0 — License, fresh installs, telemetry consent (September 2026) — SHIPPED
+
+- [x] Functional Source License (FSL-1.1-ALv2); releases up to 1.2.0 stay MIT.
+- [x] A fresh `pip install` builds its index on the first `rebuild` or `route`
+      (1.2.0 needed `snapshot-runtimes` first); CI installs the package into a
+      brand-new home and routes a task on Linux and Windows.
+- [x] Telemetry asks once during `init` / `hooks install`, in a terminal only.
+- [x] Releases from *Actions → Run workflow*: PyPI, then tag and GitHub release.
+
 ## Next — Pre-prompt activation everywhere, and measurable context budgets
 
 The strongest launch signal was not “more skill storage.” It was that selection
@@ -154,13 +164,16 @@ must happen **before the prompt** or the catalog simply becomes another pile.
   confidence is low.
 - A first-class `lockkeeper explain` view: what was eligible, selected, rejected,
   and how many body bytes/tokens each decision cost.
+- Library mode: move rarely used skills out of the folders an agent loads on
+  its own, so its built-in skill list shrinks too, and serve them through
+  routing on demand (reversible).
 - Standards-compatible import adapters for the formats people already use
   (`SKILL.md`, `AGENTS.md`, MCP configs, shared Git folders), without inventing
   another hosted capability format.
 - Re-run the context-savings benchmark in CI on deterministic fixtures and
   publish the artifact, so the README proof cannot silently drift.
 
-## v1.3 — Install & lock (`lockkeeper install`, `cap.lock`)
+## v1.4 — Install & lock (`lockkeeper install`, `cap.lock`)
 
 - Sources: git URL, tarball, local path.
 - Pipeline: fetch → audit gate → verify hash → place into selected runtime
@@ -168,7 +181,7 @@ must happen **before the prompt** or the catalog simply becomes another pile.
 - `cap.lock` pins origin commit + content hash + audit verdict per capability.
 - Runtime targets: `claude`, `codex`, `cursor`, `opencode`, `jcode`, `hermes`.
 
-## v1.4 — Remote discovery
+## v1.5 — Remote discovery
 
 - `lockkeeper search <query> --remote`: GitHub API aggregator over topic-indexed skill
   repos (no central server to operate).

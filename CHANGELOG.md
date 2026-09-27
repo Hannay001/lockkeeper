@@ -2,7 +2,10 @@
 
 All notable changes to Lockkeeper. Versions follow [semantic versioning](https://semver.org).
 
-## Unreleased
+## 1.3.0 — 2026-09-27
+
+A fresh `pip install lockkeeper` now works out of the box, Lockkeeper moves to the
+Functional Source License, and telemetry asks once instead of staying silent.
 
 ### License
 
@@ -20,10 +23,11 @@ All notable changes to Lockkeeper. Versions follow [semantic versioning](https:/
   terminal, never in scripts or CI or when `DO_NOT_TRACK` is set, and never again once
   answered. It stays off until you say yes. See
   [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
-- The README, the one-prompt installer and the Windows notes install from PyPI
-  (`pipx install lockkeeper`), with a PyPI badge.
+- The README, the one-prompt installer and the Windows notes install from PyPI:
+  `pipx install lockkeeper`, `lockkeeper init`, `lockkeeper rebuild`.
 - Releases run from *Actions → publish → Run workflow*: it uploads to PyPI, then
-  creates the tag and GitHub release with the CHANGELOG notes. See
+  creates the tag and GitHub release with the CHANGELOG notes, and it refuses a commit
+  it couldn't tag before uploading anything. See
   [docs/RELEASING.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/RELEASING.md).
 
 ### Fixed

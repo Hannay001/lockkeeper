@@ -36,7 +36,6 @@ Install from PyPI, which puts a native `lockkeeper.exe` on your PATH:
 ```powershell
 py -m pip install lockkeeper      # or: pipx install lockkeeper
 lockkeeper init
-lockkeeper snapshot-runtimes
 lockkeeper rebuild
 ```
 
