@@ -90,6 +90,16 @@ lockkeeper hooks install claude
 
 Every prompt you send now reaches Claude Code with a short note naming the installed skills that fit it and the exact files to read. Slash commands and short replies like "thanks" pass through untouched, and the hook never blocks a prompt. Undo with `lockkeeper hooks remove claude`.
 
+Then shrink the list Claude Code loads into every session:
+
+```sh
+lockkeeper library move            # shows the plan: which skills move, how many tokens it saves
+lockkeeper library move --apply    # moves them to ~/.agents/library; the hook still finds them
+lockkeeper library restore --apply # puts them all back
+```
+
+Claude Code puts the name and description of every skill in `~/.claude/skills` into each session. Library mode moves them to a folder Lockkeeper indexes but Claude Code doesn't load, so only the skills a prompt needs reach the context. Keep favorites where they are with `--keep NAME`.
+
 ### 2. As an MCP server (Codex, Cursor, Windsurf, Cline and any MCP client)
 
 `lockkeeper mcp` gives your agent three tools, `route`, `search` and `audit`, and keeps the index loaded between calls so answers are fast.
@@ -205,7 +215,7 @@ Full details: **[docs/FIREWALL.md](https://github.com/Hannay001/lockkeeper/blob/
 ## FAQ
 
 ### How do I stop too many skills from filling my Claude Code context window?
-Keep your everyday skills where Claude Code loads them, and put the large collection in a skills library that Lockkeeper indexes but your agent doesn't load on its own. Then run `lockkeeper hooks install claude`: each prompt arrives with the few library skills that fit it, and the agent reads only those `SKILL.md` files instead of carrying every description in its context.
+Run `lockkeeper hooks install claude`, then `lockkeeper library move --apply`. The first makes each prompt arrive with the few skills that fit it; the second moves your skills out of `~/.claude/skills` into a library Lockkeeper indexes but Claude Code doesn't load, so their descriptions stop filling every session. `lockkeeper library move` without `--apply` shows the plan first, `--keep NAME` leaves favorites in place, and `lockkeeper library restore --apply` undoes it.
 
 ### Does Lockkeeper work with MCP servers?
 Both ways. It indexes the MCP servers and tools your agents have configured and routes to them, and it is itself an MCP server (`lockkeeper mcp`) that Codex, Cursor, Windsurf, Cline and other clients can call.

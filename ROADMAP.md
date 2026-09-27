@@ -164,9 +164,9 @@ must happen **before the prompt** or the catalog simply becomes another pile.
   confidence is low.
 - A first-class `lockkeeper explain` view: what was eligible, selected, rejected,
   and how many body bytes/tokens each decision cost.
-- Library mode: move rarely used skills out of the folders an agent loads on
-  its own, so its built-in skill list shrinks too, and serve them through
-  routing on demand (reversible).
+- [x] Library mode (`lockkeeper library move|restore`): move skills out of the
+      folders an agent loads on its own, so its built-in skill list shrinks
+      too, and serve them through routing on demand (reversible).
 - Standards-compatible import adapters for the formats people already use
   (`SKILL.md`, `AGENTS.md`, MCP configs, shared Git folders), without inventing
   another hosted capability format.

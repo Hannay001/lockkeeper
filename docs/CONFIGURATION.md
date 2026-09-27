@@ -12,6 +12,7 @@ control.
 | `lockkeeper search "<keywords>"` | Rank capabilities by keywords. |
 | `lockkeeper audit <path>` | Scan a skill, plugin or config for prompt injection ([details](FIREWALL.md)). |
 | `lockkeeper hooks install claude` | Route every Claude Code prompt automatically. |
+| `lockkeeper library move --apply` | Move skills out of the folder an agent loads into every session; they stay routable ([details](#library-mode)). |
 | `lockkeeper mcp` | Serve `route`, `search` and `audit` to any MCP client. |
 | `lockkeeper doctor` | Show detected agents, index size and freshness. |
 | `lockkeeper check` | Verify the index against what's on disk. |
@@ -96,6 +97,35 @@ The hook (`lockkeeper route-hook`) adds a short list of fitting capabilities to 
 prompt. It never blocks a prompt, skips slash commands and short replies, and never
 waits on a re-index. `--format text` prints plain context for harnesses that expect
 that instead of Claude Code's JSON.
+
+## Library mode
+
+Agents load the name and description of every skill in their own skills folder into
+every session (Claude Code: `~/.claude/skills`). Routing can't remove that list, so
+with hundreds of skills it costs thousands of tokens before any work starts. Library
+mode moves skills from that folder to `~/.agents/library/<agent>/`, which Lockkeeper
+indexes and routes but no agent loads on its own.
+
+```sh
+lockkeeper library status                    # per agent: skills loaded, their token cost, library size
+lockkeeper library move                      # the plan (nothing changes)
+lockkeeper library move --apply              # move them; --keep NAME leaves a skill in place
+lockkeeper library restore --apply           # move them all back
+lockkeeper library restore pdf-tables --apply
+```
+
+- `move` and `restore` only print a plan until you add `--apply`.
+- For Claude Code, `move --apply` requires the routing hook (`lockkeeper hooks install
+  claude`), because without it the moved skills would be out of reach. For `--agent
+  codex|jcode|hermes`, make sure the agent routes through the MCP server or the
+  capability-router skill, then add `--force`.
+- The capability-router skill and anything named `lockkeeper…` always stay.
+- Each move is recorded in `~/.agents/library/.lockkeeper-library.json`. `restore`
+  never overwrites a skill that was installed again in the meantime; it leaves that
+  one in the library and says so.
+- Linked skill folders move as links; their targets are never touched.
+- The index is rebuilt after every `--apply`, so the hook routes to the new
+  locations immediately.
 
 ## MCP server
 

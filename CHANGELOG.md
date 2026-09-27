@@ -2,6 +2,18 @@
 
 All notable changes to Lockkeeper. Versions follow [semantic versioning](https://semver.org).
 
+## Unreleased
+
+### New
+
+- Library mode: `lockkeeper library status|move|restore`. Claude Code (and other
+  agents) put every skill's name and description from their own skills folder into
+  each session; `library move --apply` moves those skills to `~/.agents/library`,
+  which Lockkeeper indexes and routes but no agent loads, so only the skills a prompt
+  needs reach the context. Plans first, `--keep NAME` for favorites, requires the
+  routing hook for Claude Code, and `library restore --apply` undoes it. See
+  [configuration](https://github.com/Hannay001/lockkeeper/blob/main/docs/CONFIGURATION.md#library-mode).
+
 ## 1.3.0 — 2026-09-27
 
 A fresh `pip install lockkeeper` now works out of the box, Lockkeeper moves to the

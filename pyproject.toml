@@ -50,5 +50,5 @@ lockkeeper-hook = "cap_audit:main_hook"
 
 [tool.setuptools]
 package-dir = { "" = "scripts", "lockkeeper_embedder" = "embedder", "lockkeeper_decision" = "decision" }
-py-modules = ["capability_registry", "router_config", "cap_audit", "cap_setup", "decision_provider", "telemetry", "mcp_server", "route_hook"]
+py-modules = ["capability_registry", "router_config", "cap_audit", "cap_setup", "decision_provider", "telemetry", "mcp_server", "route_hook", "library"]
 packages = ["lockkeeper_embedder", "lockkeeper_decision"]

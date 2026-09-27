@@ -660,6 +660,7 @@ class RouterCliProjectSelectorTest(unittest.TestCase):
             "router_config.py",
             "decision_provider.py",
             "telemetry.py",
+            "library.py",
             "build_aliases.py",
             "build_synonym_batches.py",
             "build_audit_corpus.py",
@@ -877,6 +878,7 @@ class SupportedPythonCliContractTest(unittest.TestCase):
             "router_config.py",
             "decision_provider.py",
             "telemetry.py",
+            "library.py",
             "capability-registry",
             "capability-catalog.mjs",
         ):
@@ -1064,7 +1066,7 @@ class PolicyPackTest(unittest.TestCase):
         self.root = (Path(self._temporary_directory.name) / "router").resolve(strict=False)
         scripts = self.root / "scripts"
         scripts.mkdir(parents=True)
-        for filename in ("capability_registry.py", "router_config.py", "decision_provider.py", "telemetry.py"):
+        for filename in ("capability_registry.py", "router_config.py", "decision_provider.py", "telemetry.py", "library.py"):
             shutil.copy2(REPOSITORY_ROOT / "scripts" / filename, scripts / filename)
 
     def _load_module(self):
@@ -1112,7 +1114,7 @@ class PolicyPackBehaviorTest(unittest.TestCase):
         scripts = self.router_root / "scripts"
         scripts.mkdir(parents=True)
         (self.router_root / "config").mkdir()
-        for filename in ("capability_registry.py", "router_config.py", "decision_provider.py", "telemetry.py"):
+        for filename in ("capability_registry.py", "router_config.py", "decision_provider.py", "telemetry.py", "library.py"):
             shutil.copy2(REPOSITORY_ROOT / "scripts" / filename, scripts / filename)
         (self.router_root / "data" / "snapshots").mkdir(parents=True)
         self._saved_path = sys.path[:]
