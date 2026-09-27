@@ -51,7 +51,7 @@ context savings: loaded 6 of 7,540 eligible capabilities (7,534 kept out of cont
 - **📉 A context window that stays small.** With 58,018 capabilities in the library, a routed task still carries a median of about **8,700 tokens** of skills instead of about 77.5 million. Adding skills to the library doesn't grow your prompt.
 - **🛡 Safer skills and plugins.** Scan any skill, plugin or MCP config for hidden instructions and data exfiltration before your agent reads it, and block hostile tool calls live.
 - **🔌 Works where you already work.** Automatic routing in Claude Code, an MCP server for Codex, Cursor, Windsurf, Cline and other clients, and a CLI for everything else.
-- **🔒 Local, private and dependency-free.** Pure Python standard library. No GPU, API key or cloud service needed. Telemetry is off unless you opt in.
+- **🔒 Local, private and dependency-free.** Pure Python standard library. No GPU, API key or cloud service needed. Telemetry is off unless you say yes.
 
 ## Quickstart
 
@@ -216,7 +216,7 @@ Run `lockkeeper audit path/to/skill --recursive --strict`. A `hostile` verdict (
 No. Routing, indexing and auditing run locally. The only network features are opt-in: the osv.dev dependency check, the LLM scan, remote decision providers, and the optional embedding sidecar, which downloads its model once.
 
 ### Is there telemetry?
-Only if you opt in with `lockkeeper telemetry on`. It shares anonymous daily counts (which commands ran and how fast), never prompts, skill names or file paths, and `DO_NOT_TRACK=1` always turns it off. See [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
+Only if you say yes. `lockkeeper init` and `lockkeeper hooks install` ask once, in your terminal (never in scripts or CI), and `lockkeeper telemetry on|off` changes your answer at any time. It shares anonymous daily counts (which commands ran and how fast), never prompts, skill names or file paths, and `DO_NOT_TRACK=1` always turns it off. See [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
 
 ### Is Lockkeeper free to use?
 Yes, for you and your company, including at work and on commercial projects: use it, change it and share it. What the [Functional Source License](https://fsl.software/) (FSL-1.1-ALv2) doesn't allow is offering Lockkeeper, or a product built from it, to others as a commercial product or service that competes with it. Each release becomes Apache 2.0 two years after it ships, and versions up to 1.2.0 remain under the MIT license.

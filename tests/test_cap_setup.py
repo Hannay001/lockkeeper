@@ -73,6 +73,16 @@ class InitBindingTest(unittest.TestCase):
         self.assertIn("extra_skill_roots", text)
         self.assertIn(".codex/skills", text.replace("\\", "/").replace("//", "/"))
 
+    def test_init_offers_the_telemetry_question_once_it_succeeds(self) -> None:
+        import contextlib
+        from io import StringIO
+
+        import telemetry
+
+        with mock.patch.object(telemetry, "ask_once") as ask, contextlib.redirect_stdout(StringIO()):
+            self.assertEqual(cap_setup.main(["init"]), 0)
+        ask.assert_called_once_with()
+
     def test_init_unknown_runtime_fails_without_force(self) -> None:
         import contextlib
         from io import StringIO

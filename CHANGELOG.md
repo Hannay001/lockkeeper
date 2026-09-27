@@ -15,6 +15,11 @@ All notable changes to Lockkeeper. Versions follow [semantic versioning](https:/
 
 ### New
 
+- Telemetry asks once. `lockkeeper init` and `lockkeeper hooks install` ask whether to
+  share anonymous daily usage counts (Enter means yes), only in an interactive
+  terminal, never in scripts or CI or when `DO_NOT_TRACK` is set, and never again once
+  answered. It stays off until you say yes. See
+  [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
 - Releases run from *Actions → publish → Run workflow*: it uploads to PyPI, then
   creates the tag and GitHub release with the CHANGELOG notes. See
   [docs/RELEASING.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/RELEASING.md).

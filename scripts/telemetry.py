@@ -1,8 +1,10 @@
 """Opt-in, anonymous usage telemetry for Lockkeeper.
 
-OFF by default. Nothing is recorded, stored or sent until a user runs
-`lockkeeper telemetry on`, and DO_NOT_TRACK=1, LOCKKEEPER_TELEMETRY=0 or a CI
-environment always force it off. See docs/TELEMETRY.md.
+OFF by default. Nothing is recorded, stored or sent until a user says yes:
+`lockkeeper init` and `lockkeeper hooks install` ask once, in an interactive
+terminal only (ask_once), and `lockkeeper telemetry on|off` decides at any time.
+DO_NOT_TRACK=1, LOCKKEEPER_TELEMETRY=0 or a CI environment always force it off
+and suppress the question. See docs/TELEMETRY.md.
 
 What is collected, as ONE aggregate per day -- never per-command events:
 
@@ -123,6 +125,11 @@ def forced_off_reason(environ: Optional[dict[str, str]] = None) -> str:
 
 def settings() -> dict[str, Any]:
     return _read_json(settings_path())
+
+
+def decided() -> bool:
+    """True once the user has chosen, either way (the prompt, `telemetry on` or `off`)."""
+    return isinstance(settings().get("enabled"), bool)
 
 
 def enabled() -> bool:
@@ -279,6 +286,84 @@ def flush(complete_days_only: bool = False) -> int:
         return 0
 
 
+# ---------------------------------------------------------------- choosing
+
+
+def turn_on(collector: str = "") -> None:
+    current = settings()
+    if collector:
+        current["endpoint"] = check_endpoint(collector.strip())
+    current.update(
+        {
+            "enabled": True,
+            "install_id": current.get("install_id") or uuid.uuid4().hex,
+            "decided_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+    )
+    _write_json(settings_path(), current)
+
+
+def turn_off() -> None:
+    _write_json(
+        settings_path(),
+        {"enabled": False, "decided_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+    )
+    spool_path().unlink(missing_ok=True)
+
+
+ASK_TEXT = f"""
+Help improve Lockkeeper?
+  Lockkeeper can share anonymous daily counts: which commands ran and how long they
+  took, which agents you route for, your index size as a range, and the Lockkeeper,
+  Python and OS versions. Never prompts, skill names, file paths or code. See exactly
+  what with `lockkeeper telemetry show`; stop any time with `lockkeeper telemetry off`.
+  Details: https://github.com/Hannay001/lockkeeper/blob/main/{DOCS}"""
+ASK_QUESTION = "Share anonymous usage counts? [Y/n] "
+
+
+def ask_once(stdin: Any = None, stdout: Any = None, environ: Optional[dict[str, str]] = None) -> Optional[bool]:
+    """Ask whether to share anonymous usage counts, once per machine.
+
+    Only in an interactive terminal (stdin and stdout both a TTY), never when
+    DO_NOT_TRACK, LOCKKEEPER_TELEMETRY or CI already decide, and never again once
+    answered either way. Enter means yes. Returns the choice, or None when it
+    didn't ask or got no answer (end of input, Ctrl-C), which leaves the question
+    for next time. It never raises: setup must not fail over telemetry.
+    """
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    try:
+        if forced_off_reason(environ) or decided() or not (stdin.isatty() and stdout.isatty()):
+            return None
+        print(ASK_TEXT, file=stdout)
+        choice: Optional[bool] = None
+        for _attempt in range(3):
+            stdout.write(ASK_QUESTION)
+            stdout.flush()
+            line = stdin.readline()
+            if not line:
+                print(file=stdout)
+                return None
+            answer = line.strip().lower()
+            if answer in ("", "y", "yes"):
+                choice = True
+                break
+            if answer in ("n", "no"):
+                choice = False
+                break
+        if choice is None:
+            choice = False
+        if choice:
+            turn_on()
+            print("telemetry: on -- thank you. Stop any time with `lockkeeper telemetry off`.", file=stdout)
+        else:
+            turn_off()
+            print("telemetry: off. You won't be asked again; `lockkeeper telemetry on` changes it.", file=stdout)
+        return choice
+    except (KeyboardInterrupt, OSError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------- CLI
 
 
@@ -314,26 +399,12 @@ def cli(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     action = args.action or "status"
     if action == "on":
-        current = settings()
-        if args.endpoint:
-            current["endpoint"] = check_endpoint(args.endpoint.strip())
-        current.update(
-            {
-                "enabled": True,
-                "install_id": current.get("install_id") or uuid.uuid4().hex,
-                "decided_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            }
-        )
-        _write_json(settings_path(), current)
+        turn_on(args.endpoint or "")
         print("telemetry: on -- thank you. Anonymous daily counts only; never prompts, names or paths.")
         print("\n".join(status_lines()[1:]))
         return 0
     if action == "off":
-        _write_json(
-            settings_path(),
-            {"enabled": False, "decided_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
-        )
-        spool_path().unlink(missing_ok=True)
+        turn_off()
         print("telemetry: off. The local summary and install id were deleted.")
         return 0
     if action == "show":
