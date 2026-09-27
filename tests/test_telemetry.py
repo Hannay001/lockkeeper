@@ -138,5 +138,78 @@ class TelemetryTest(unittest.TestCase):
             telemetry.record(["route"], 0.1, False)  # must not raise
 
 
+class _Terminal(io.StringIO):
+    """A stream that says whether it is a terminal, like sys.stdin/sys.stdout do."""
+
+    def __init__(self, text: str = "", tty: bool = True) -> None:
+        super().__init__(text)
+        self.tty = tty
+
+    def isatty(self) -> bool:
+        return self.tty
+
+
+class AskOnceTest(TelemetryTest):
+    def ask(self, answers: str, *, tty: bool = True, environ: dict | None = None) -> tuple[object, str]:
+        stdout = _Terminal(tty=tty)
+        return telemetry.ask_once(_Terminal(answers, tty=tty), stdout, environ), stdout.getvalue()
+
+    def test_enter_means_yes_and_the_question_is_asked_only_once(self) -> None:
+        choice, shown = self.ask("\n")
+        self.assertIs(choice, True)
+        self.assertIn("Never prompts, skill names, file paths or code", shown)
+        self.assertIn("[Y/n]", shown)
+        self.assertTrue(telemetry.enabled())
+        self.assertEqual(self.ask("n\n"), (None, ""), "an answered question is never asked again")
+        self.assertTrue(telemetry.enabled())
+
+    def test_no_turns_it_off_and_is_remembered(self) -> None:
+        self.assertIs(self.ask("No\n")[0], False)
+        self.assertTrue(telemetry.decided())
+        self.assertFalse(telemetry.enabled())
+        self.assertEqual(self.ask("\n"), (None, ""))
+        self.assertFalse(telemetry.enabled())
+
+    def test_it_never_asks_outside_an_interactive_terminal(self) -> None:
+        self.assertEqual(self.ask("y\n", tty=False), (None, ""))
+        stdout = _Terminal()
+        self.assertIsNone(telemetry.ask_once(_Terminal("y\n", tty=False), stdout))
+        self.assertIsNone(telemetry.ask_once(_Terminal("y\n"), _Terminal(tty=False)))
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertFalse(telemetry.decided())
+
+    def test_do_not_track_ci_and_the_switch_suppress_the_question(self) -> None:
+        for environ in ({"DO_NOT_TRACK": "1"}, {"CI": "true"}, {telemetry.SWITCH_ENV: "0"}):
+            with self.subTest(environ=environ):
+                self.assertEqual(self.ask("y\n", environ=environ), (None, ""))
+        self.assertFalse(telemetry.decided())
+
+    def test_no_answer_leaves_the_question_for_next_time(self) -> None:
+        self.assertIsNone(self.ask("")[0])
+        self.assertFalse(telemetry.decided())
+
+    def test_unclear_answers_are_asked_again_then_count_as_no(self) -> None:
+        self.assertIs(self.ask("maybe\nyes\n")[0], True)
+        self.cli("off")
+        settings = telemetry.settings_path()
+        settings.unlink()
+        self.assertIs(self.ask("a\nb\nc\n")[0], False)
+        self.assertFalse(telemetry.enabled())
+
+    def test_setup_commands_ask_and_other_commands_do_not(self) -> None:
+        import route_hook
+
+        with (
+            mock.patch.object(telemetry, "ask_once") as ask,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(route_hook.setup_cli(["show", "claude"]), 0)
+            self.assertEqual(route_hook.setup_cli(["remove", "claude"]), 0)
+            ask.assert_not_called()
+            self.assertEqual(route_hook.setup_cli(["install", "claude"]), 0)
+            ask.assert_called_once_with()
+
+
 if __name__ == "__main__":
     unittest.main()

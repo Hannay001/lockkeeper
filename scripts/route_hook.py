@@ -282,6 +282,9 @@ def setup_cli(argv: list[str]) -> int:
             print(f"{path}: " + (f"added {', '.join(added)}" if added else "already installed, nothing changed"))
             if added:
                 print("Every prompt now arrives with the capabilities that fit it. Undo: lockkeeper hooks remove claude")
+            import telemetry
+
+            telemetry.ask_once()
             return 0
         removed = remove(path)
         print(f"{path}: " + (f"removed {', '.join(removed)}" if removed else "no Lockkeeper hooks found"))

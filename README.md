@@ -16,7 +16,7 @@ Smaller context window, better tool choices, and no unvetted skill instructions 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 ![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 ![macOS, Linux, Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)
-[![MIT license](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE)
 
 [Quickstart](#quickstart) · [Ways to use it](#four-ways-to-use-lockkeeper) · [Benchmark](#proven-on-a-public-benchmark) · [Firewall](#prompt-injection-firewall-for-skills-and-mcp) · [FAQ](#faq) · [Docs](#documentation)
 
@@ -51,7 +51,7 @@ context savings: loaded 6 of 7,540 eligible capabilities (7,534 kept out of cont
 - **📉 A context window that stays small.** With 58,018 capabilities in the library, a routed task still carries a median of about **8,700 tokens** of skills instead of about 77.5 million. Adding skills to the library doesn't grow your prompt.
 - **🛡 Safer skills and plugins.** Scan any skill, plugin or MCP config for hidden instructions and data exfiltration before your agent reads it, and block hostile tool calls live.
 - **🔌 Works where you already work.** Automatic routing in Claude Code, an MCP server for Codex, Cursor, Windsurf, Cline and other clients, and a CLI for everything else.
-- **🔒 Local, private and dependency-free.** Pure Python standard library. No GPU, API key or cloud service needed. Telemetry is off unless you opt in.
+- **🔒 Local, private and dependency-free.** Pure Python standard library. No GPU, API key or cloud service needed. Telemetry is off unless you say yes.
 
 ## Quickstart
 
@@ -216,7 +216,10 @@ Run `lockkeeper audit path/to/skill --recursive --strict`. A `hostile` verdict (
 No. Routing, indexing and auditing run locally. The only network features are opt-in: the osv.dev dependency check, the LLM scan, remote decision providers, and the optional embedding sidecar, which downloads its model once.
 
 ### Is there telemetry?
-Only if you opt in with `lockkeeper telemetry on`. It shares anonymous daily counts (which commands ran and how fast), never prompts, skill names or file paths, and `DO_NOT_TRACK=1` always turns it off. See [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
+Only if you say yes. `lockkeeper init` and `lockkeeper hooks install` ask once, in your terminal (never in scripts or CI), and `lockkeeper telemetry on|off` changes your answer at any time. It shares anonymous daily counts (which commands ran and how fast), never prompts, skill names or file paths, and `DO_NOT_TRACK=1` always turns it off. See [docs/TELEMETRY.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/TELEMETRY.md).
+
+### Is Lockkeeper free to use?
+Yes, for you and your company, including at work and on commercial projects: use it, change it and share it. What the [Functional Source License](https://fsl.software/) (FSL-1.1-ALv2) doesn't allow is offering Lockkeeper, or a product built from it, to others as a commercial product or service that competes with it. Each release becomes Apache 2.0 two years after it ships, and versions up to 1.2.0 remain under the MIT license.
 
 ### Do I need a GPU, an API key or an embedding model?
 No. The core uses only the Python standard library. Embeddings and decision models are optional add-ons.
@@ -246,13 +249,15 @@ Issues, ideas and pull requests are welcome. To run the tests:
 HOME="$(mktemp -d)" python3 -m unittest discover -s tests -p "test_*.py" -t .
 ```
 
+By submitting a pull request, you agree to license your contribution under the project's [license](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE).
+
 Found a security issue or a way past the firewall? Please report it privately per [SECURITY.md](https://github.com/Hannay001/lockkeeper/blob/main/SECURITY.md).
 
 ---
 
 <div align="center">
 
-Built and maintained by **[Himanshu (@Hannay001)](https://github.com/Hannay001)** · [MIT License](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE)
+Built and maintained by **[Himanshu (@Hannay001)](https://github.com/Hannay001)** · [Functional Source License (FSL-1.1-ALv2)](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE)
 
 **If Lockkeeper saves you context or catches something nasty, a ⭐ helps other developers find it.**
 

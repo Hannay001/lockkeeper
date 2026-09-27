@@ -199,7 +199,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"  - {root}")
     print(f"bindings written: {local_path}")
     print("next: lockkeeper rebuild && lockkeeper doctor")
+    _ask_about_telemetry()
     return 0
+
+
+def _ask_about_telemetry() -> None:
+    """Setup is the one moment to ask, once and only in a terminal (telemetry.ask_once)."""
+    try:
+        import telemetry
+    except ImportError:
+        return
+    telemetry.ask_once()
 
 
 def _surface_candidates() -> list[str]:

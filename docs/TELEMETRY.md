@@ -1,8 +1,31 @@
 # Telemetry
 
 Lockkeeper is a local security tool, so telemetry is **off by default** and stays
-off unless you turn it on. If you do, you help us see which features people use,
+off unless you say yes. If you do, you help us see which features people use,
 how fast routing is on real machines, and how many people use Lockkeeper at all.
+
+## You are asked once
+
+`lockkeeper init` and `lockkeeper hooks install` ask one question the first time you
+run them:
+
+```text
+Help improve Lockkeeper?
+  Lockkeeper can share anonymous daily counts: which commands ran and how long they
+  took, which agents you route for, your index size as a range, and the Lockkeeper,
+  Python and OS versions. Never prompts, skill names, file paths or code. ...
+Share anonymous usage counts? [Y/n]
+```
+
+- Press Enter or type `y` to share; type `n` to decline. Either answer is remembered
+  and you are never asked again. `telemetry on` and `telemetry off` change it at any
+  time.
+- It is only asked in an interactive terminal. Scripts, pipes, agents running
+  commands for you, and CI never see it, and nothing is turned on for them.
+- `DO_NOT_TRACK=1`, `LOCKKEEPER_TELEMETRY=0` or a CI environment skip the question
+  and keep telemetry off.
+- No answer (end of input or Ctrl-C) decides nothing: the question comes back next
+  time.
 
 ```sh
 lockkeeper telemetry            # status: on or off, and where data would go

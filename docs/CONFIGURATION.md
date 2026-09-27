@@ -16,7 +16,7 @@ control.
 | `lockkeeper doctor` | Show detected agents, index size and freshness. |
 | `lockkeeper check` | Verify the index against what's on disk. |
 | `lockkeeper snapshot-runtimes` | Refresh MCP, plugin and tool inventories from your agents. |
-| `lockkeeper telemetry` | Opt-in anonymous usage counts ([details](TELEMETRY.md)). |
+| `lockkeeper telemetry` | Opt-in anonymous usage counts; `init` and `hooks install` ask once ([details](TELEMETRY.md)). |
 
 Add `--json` to `route`, `search` and `audit` for machine-readable output, and
 `--runtime claude|codex|hermes|jcode|shared` to route from a specific agent's point of
