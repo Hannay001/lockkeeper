@@ -34,7 +34,10 @@ project page appears at <https://pypi.org/project/lockkeeper/>.
    [CHANGELOG.md](../CHANGELOG.md). Merge that to `main`.
 2. Open *Actions → publish → Run workflow* and enter the version, for example
    `1.2.0`. Leave *commit* empty to release the latest `main`, or give the full SHA
-   of an earlier `main` commit.
+   of an earlier `main` commit. An earlier commit only works if its
+   `.github/workflows` files match `main`'s: GitHub never lets a workflow's own token
+   tag a commit with different workflow files. For such a commit, publish a GitHub
+   release by hand instead (below).
 3. The workflow checks the version matches `pyproject.toml` at that commit, that the
    commit is on `main` and that the tag doesn't exist yet. It runs the test suite,
    builds the sdist and wheel, checks them with `twine check --strict`, smoke-tests
