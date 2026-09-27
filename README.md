@@ -12,7 +12,7 @@
 Give **Claude Code, Codex, Cursor** and other AI agents the few skills, MCP servers and tools that fit each task, instead of all of them.<br>
 Smaller context window, better tool choices, and no unvetted skill instructions reaching your agent.
 
-[![PyPI](https://img.shields.io/pypi/v/lockkeeper.svg)](https://pypi.org/project/lockkeeper/)
+[![PyPI version](https://badge.fury.io/py/lockkeeper.svg)](https://pypi.org/project/lockkeeper/)
 [![tests](https://github.com/Hannay001/lockkeeper/actions/workflows/tests.yml/badge.svg)](https://github.com/Hannay001/lockkeeper/actions/workflows/tests.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 ![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
