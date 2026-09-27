@@ -23,7 +23,6 @@ Do exactly these steps:
    Codex, Cursor, Jcode, Hermes, OpenCode, Gemini, or anything else):
    lockkeeper init
 4. Build the capability index:
-   lockkeeper snapshot-runtimes
    lockkeeper rebuild
 5. Run the health check:
    lockkeeper doctor

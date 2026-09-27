@@ -68,9 +68,8 @@ lockkeeper init             # finds every AI agent on this machine and connects 
 **2. Index what you have installed:**
 
 ```sh
-lockkeeper snapshot-runtimes   # records your agents' MCP servers and plugins
-lockkeeper rebuild
-lockkeeper doctor              # shows each agent found and how many skills it has
+lockkeeper rebuild    # indexes every skill, agent, command, MCP server and plugin it finds
+lockkeeper doctor     # shows each agent found and how many skills it has
 ```
 
 **3. Route a task:**
