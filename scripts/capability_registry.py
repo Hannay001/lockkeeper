@@ -74,6 +74,9 @@ def configured_skill_roots(config: RouterConfig) -> list[tuple[str, Path, str]]:
     """Return the live skill roots, including the configured Hermes surface."""
     builtin = [
         ("shared", Path.home() / ".agents" / "skills", "skills-root"),
+        # `lockkeeper library move` puts skills here: indexed and routable from every
+        # runtime, but loaded by no agent on its own (library.py).
+        ("shared", Path.home() / ".agents" / "library", "skills-root"),
         ("codex", Path.home() / ".codex" / "skills", "skills-root"),
         ("claude", Path.home() / ".claude" / "skills", "skills-root"),
         ("hermes", Path.home() / ".hermes" / "skills", "skills-root"),
@@ -6778,6 +6781,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "hooks", help="Wire Lockkeeper into Claude Code: `lockkeeper hooks install claude [--firewall]`"
     )
+    import library
+
+    library.add_parser(subparsers)
     return parser
 
 
@@ -6978,6 +6984,10 @@ def _main() -> int:
             reindex_semantic(output)
         elif args.command == "snapshot-runtimes":
             refresh_runtime_snapshots()
+        elif args.command == "library":
+            import library
+
+            return library.run(args, lambda: rebuild(output, quiet=True))
         elif args.command == "import-codex-tools":
             import_codex_tools(args.file.expanduser() if args.file else None)
         elif args.command == "prune-auto-discovery":
