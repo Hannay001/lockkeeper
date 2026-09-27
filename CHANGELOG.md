@@ -2,6 +2,23 @@
 
 All notable changes to Lockkeeper. Versions follow [semantic versioning](https://semver.org).
 
+## Unreleased
+
+### License
+
+- Lockkeeper is now licensed under the [Functional Source License, Version 1.1, ALv2
+  Future License](https://github.com/Hannay001/lockkeeper/blob/main/LICENSE)
+  (FSL-1.1-ALv2). You can use, modify and share it for any purpose, including at work
+  and on commercial projects, except offering it, or a product built from it, as a
+  competing commercial product or service. Each release becomes Apache 2.0 two years
+  after it ships. Releases up to and including 1.2.0 remain under the MIT license.
+
+### New
+
+- Releases run from *Actions → publish → Run workflow*: it uploads to PyPI, then
+  creates the tag and GitHub release with the CHANGELOG notes. See
+  [docs/RELEASING.md](https://github.com/Hannay001/lockkeeper/blob/main/docs/RELEASING.md).
+
 ## 1.2.0 — 2026-09-26
 
 The biggest release since the first one: Lockkeeper picks the right skill far more
