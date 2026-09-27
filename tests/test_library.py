@@ -130,6 +130,14 @@ class LibraryTest(FreshnessFixture):
         self.assertEqual(moved.resolve(), source.resolve())
         self.assertTrue((source / "SKILL.md").is_file(), "the link's target is never touched")
 
+    def test_the_claude_code_plugin_counts_as_routing(self) -> None:
+        settings = self.home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({"enabledPlugins": {"lockkeeper@lockkeeper": True}}), encoding="utf-8")
+        code, shown = self.library_cli("move", "--apply")
+        self.assertEqual(code, 0, shown)
+        self.assertEqual(self.names_in(self.claude_skills), {"capability-router"})
+
     def test_status_counts_what_each_agent_loads(self) -> None:
         code, shown = self.library_cli("status")
         self.assertEqual(code, 0)

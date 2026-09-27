@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lockkeeper": {
+      "command": "lockkeeper",
+      "args": ["mcp", "--runtime", "claude"]
+    }
+  }
+}

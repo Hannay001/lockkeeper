@@ -154,9 +154,11 @@ def routing_ready(agent: str) -> tuple[bool, str]:
             route_hook._is_lockkeeper_hook(group, " route-hook") for group in groups
         ):
             return True, f"routing hook found in {settings}"
+        if route_hook.plugin_enabled(settings):
+            return True, f"Lockkeeper plugin enabled in {settings}"
     return False, (
         "Claude Code doesn't route through Lockkeeper yet, so moved skills would be out of reach. "
-        "Run `lockkeeper hooks install claude` first (or pass --force)"
+        "Install the Lockkeeper plugin or run `lockkeeper hooks install claude` first (or pass --force)"
     )
 
 

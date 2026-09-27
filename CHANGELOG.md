@@ -2,7 +2,10 @@
 
 All notable changes to Lockkeeper. Versions follow [semantic versioning](https://semver.org).
 
-## Unreleased
+## 1.4.0 — 2026-09-27
+
+Library mode shrinks the skill list your agent carries into every session, and
+Lockkeeper is now one command away in Claude Code, the MCP Registry and skills.sh.
 
 ### New
 
@@ -13,6 +16,15 @@ All notable changes to Lockkeeper. Versions follow [semantic versioning](https:/
   needs reach the context. Plans first, `--keep NAME` for favorites, requires the
   routing hook for Claude Code, and `library restore --apply` undoes it. See
   [configuration](https://github.com/Hannay001/lockkeeper/blob/main/docs/CONFIGURATION.md#library-mode).
+- Claude Code plugin: `/plugin marketplace add Hannay001/lockkeeper`, then
+  `/plugin install lockkeeper@lockkeeper`, adds the routing hook, the MCP server and
+  the router skill in one step (the `lockkeeper` command must be installed).
+  `library move` accepts the plugin as routing, and `hooks install` warns when the
+  plugin is enabled, since prompts would be routed twice.
+- Listed in the official MCP Registry as `io.github.Hannay001/lockkeeper`; each
+  release publishes there from the release workflow, with GitHub OIDC and no stored
+  secret.
+- `npx skills add Hannay001/lockkeeper` installs the router skill for any agent.
 
 ## 1.3.0 — 2026-09-27
 
