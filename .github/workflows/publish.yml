@@ -62,6 +62,12 @@ jobs:
             if git rev-parse -q --verify "refs/tags/v$wanted" >/dev/null; then
               echo "::error::tag v$wanted already exists; release a new version instead"; exit 1
             fi
+            # GitHub never lets a workflow's token create a tag on a commit whose
+            # workflow files differ from main's, so stop here, before anything
+            # irreversible (the PyPI upload), rather than failing at the tag.
+            if ! git diff --quiet origin/main HEAD -- .github/workflows; then
+              echo "::error::this commit's .github/workflows differ from main, so this workflow can't tag it; release the latest main, or publish a GitHub release by hand for it"; exit 1
+            fi
           else
             wanted="${GITHUB_REF_NAME#v}"
           fi
