@@ -114,6 +114,13 @@ jobs:
           HOME="$(mktemp -d)" smoke/bin/lockkeeper telemetry status
           HOME="$(mktemp -d)" smoke/bin/lockkeeper hooks show claude
           smoke/bin/lockkeeper-audit README.md --strict
+          # the pip quickstart: a new home with one skill must route
+          FRESH="$(mktemp -d)"
+          mkdir -p "$FRESH/.claude/skills/pytest-writer"
+          printf -- '---\nname: pytest-writer\ndescription: Write unit tests for Python code with pytest.\n---\nUse pytest.\n' \
+            > "$FRESH/.claude/skills/pytest-writer/SKILL.md"
+          HOME="$FRESH" smoke/bin/lockkeeper route --runtime claude "write unit tests for a python data pipeline" \
+            | grep "skill:pytest-writer" > /dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist

@@ -856,6 +856,34 @@ def validate_required_snapshots() -> None:
         load_required_json(path, shape)
 
 
+def ensure_runtime_snapshots(capture: bool = True) -> None:
+    """Give a fresh install its agent inventories instead of failing without them.
+
+    A git clone starts from seeded placeholder snapshots, but `pip install` has
+    none, so `pip install lockkeeper && lockkeeper rebuild` (or `route`) used to
+    fail on "Required runtime snapshot is missing". When any snapshot has never
+    been written, capture them now (what `snapshot-runtimes` does, within the
+    self-heal budget) unless capture=False, and fill whatever is still missing
+    with empty inventories, exactly like a seeded clone. Existing snapshots,
+    even stale ones, are left alone.
+    """
+    if all(path.is_file() for path in REQUIRED_SNAPSHOT_SHAPES):
+        return
+    if capture:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                refresh_runtime_snapshots(budget_seconds=SNAPSHOT_AUTOHEAL_BUDGET_SECONDS)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            _warn_once(
+                f"could not capture agent MCP and plugin inventories ({redact_sensitive_text(error, 200)}); "
+                "indexing without them. Run `lockkeeper snapshot-runtimes` to capture them"
+            )
+    for path, shape in REQUIRED_SNAPSHOT_SHAPES.items():
+        if not path.is_file():
+            empty = {"schema_version": 1, **{key: kind() for key, kind in shape.items()}}
+            atomic_write(path, json.dumps(empty, indent=2) + "\n")
+
+
 def load_toml(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
@@ -3245,6 +3273,7 @@ def registry_write_lock(output: Path):
 
 def rebuild(output: Path, quiet: bool = False) -> dict[str, Any]:
     ensure_router_config_valid()
+    ensure_runtime_snapshots()
     output.mkdir(parents=True, exist_ok=True)
     with registry_write_lock(output):
         return _rebuild_locked(output, quiet)
@@ -3598,6 +3627,11 @@ def ensure_query_registry_fresh(output: Path) -> Optional[list[dict[str, Any]]]:
     remains a visible error rather than being hidden behind repeated rebuilds.
     """
     initial_staleness: RuntimeError | None = None
+    if output.resolve(strict=False) == ROUTER_CONFIG.output_dir.resolve(strict=False):
+        # A fresh pip install has no snapshots yet. Without an index, the
+        # "Registry missing" repair below captures them right away, so only write
+        # placeholders here; with an index, capture now.
+        ensure_runtime_snapshots(capture=(output / "registry.jsonl").is_file())
     try:
         return assert_registry_fresh(output, deep=False)
     except RuntimeError as initial_error:

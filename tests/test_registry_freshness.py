@@ -142,6 +142,58 @@ class FreshnessFixture(unittest.TestCase):
         return caught.exception
 
 
+
+class FreshInstallSnapshotTest(FreshnessFixture):
+    """A pip install has no seeded snapshots: rebuild and route must still work.
+
+    Regression: 1.2.0 on PyPI failed `lockkeeper rebuild` and `route` with
+    "Required runtime snapshot is missing" until `snapshot-runtimes` was run; a
+    git clone hid it with seeded placeholders.
+    """
+
+    def forget_snapshots(self) -> None:
+        for path in registry.REQUIRED_SNAPSHOT_SHAPES:
+            path.unlink()
+
+    def test_rebuild_captures_missing_snapshots_first(self) -> None:
+        self.forget_snapshots()
+        with mock.patch.object(registry, "refresh_runtime_snapshots") as capture:
+            self.build()
+        capture.assert_called_once()
+        self.assertTrue(all(path.is_file() for path in registry.REQUIRED_SNAPSHOT_SHAPES))
+        self.assertEqual(json.loads(registry.TOOL_SNAPSHOT.read_text(encoding="utf-8")), {"schema_version": 1, "tools": []})
+        self.assertEqual(
+            {row["name"] for row in self.assert_fresh() if row["type"] == "skill"}, {"api-migration", "webhook-audit"}
+        )
+
+    def test_a_failed_capture_still_indexes_with_empty_inventories(self) -> None:
+        self.forget_snapshots()
+        with (
+            mock.patch.object(registry, "refresh_runtime_snapshots", side_effect=RuntimeError("claude CLI broke")),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            self.build()
+        self.assertIn("snapshot-runtimes", stderr.getvalue())
+        self.assertEqual(json.loads(registry.PLUGIN_SNAPSHOT.read_text(encoding="utf-8")), {"schema_version": 1, "plugins": {}})
+        self.assertTrue(self.assert_fresh())
+
+    def test_a_first_route_without_an_index_captures_once(self) -> None:
+        self.forget_snapshots()
+        with (
+            mock.patch.object(registry, "refresh_runtime_snapshots") as capture,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            records = registry.ensure_query_registry_fresh(self.output)
+        self.assertEqual(capture.call_count, 1, "placeholders first, then the index repair captures once")
+        self.assertIn("webhook-audit", {row["name"] for row in records})
+
+    def test_existing_snapshots_are_left_alone(self) -> None:
+        before = {path: path.read_bytes() for path in registry.REQUIRED_SNAPSHOT_SHAPES}
+        with mock.patch.object(registry, "refresh_runtime_snapshots") as capture:
+            registry.ensure_runtime_snapshots()
+        capture.assert_not_called()
+        self.assertEqual({path: path.read_bytes() for path in registry.REQUIRED_SNAPSHOT_SHAPES}, before)
+
 class HarnessConfigNoiseTest(FreshnessFixture):
     def test_opening_new_projects_in_claude_code_keeps_the_registry_fresh(self) -> None:
         claude_json = self.home / ".claude.json"
