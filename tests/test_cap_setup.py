@@ -1,6 +1,7 @@
 """Tests for harness discovery, init bindings, and doctor."""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -72,6 +73,20 @@ class InitBindingTest(unittest.TestCase):
         text = local.read_text(encoding="utf-8")
         self.assertIn("extra_skill_roots", text)
         self.assertIn(".codex/skills", text.replace("\\", "/").replace("//", "/"))
+
+    def test_an_installed_copy_writes_bindings_to_the_user_config(self) -> None:
+        """A pip/pipx install has no config/ beside its modules; never write into site-packages."""
+        import contextlib
+        from io import StringIO
+
+        (self.repo / "config").rmdir()
+        user_dir = Path(self._tmp.name) / "user-config"
+        with mock.patch.dict(os.environ, {"LOCKKEEPER_CONFIG_DIR": str(user_dir)}):
+            with contextlib.redirect_stdout(StringIO()):
+                rc = cap_setup.main(["init"])
+        self.assertEqual(rc, 0)
+        self.assertFalse((self.repo / "config").exists())
+        self.assertIn("extra_skill_roots", (user_dir / "config.toml").read_text(encoding="utf-8"))
 
     def test_init_offers_the_telemetry_question_once_it_succeeds(self) -> None:
         import contextlib

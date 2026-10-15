@@ -51,6 +51,7 @@ from router_config import (
     load_router_config,
     resolve_bundle_size,
     split_project_argument,
+    user_config_dir,
 )
 import decision_provider
 import telemetry
@@ -406,6 +407,8 @@ def authoritative_config_paths() -> tuple[Path, ...]:
         # manufacture a fake input change and trigger self-heal thrash.
         *ROUTER_CONFIG.active_config_paths,
         *_deterministic_config_dir().glob("*.toml"),
+        # The per-user layer, likewise selection-independent.
+        *_user_config_files(),
     ]
     for root in (
         Path.home() / ".claude" / "plugins" / "cache",
@@ -5203,19 +5206,34 @@ def _router_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _user_config_files() -> list[Path]:
+    """The per-user config.toml and project overlays that exist, sorted."""
+    base = user_config_dir()
+    files = [base / "config.toml"] if (base / "config.toml").is_file() else []
+    return files + sorted((base / "projects").glob("*.toml"))
+
+
 def available_projects() -> list[str]:
-    """List configured project overlays found in <router root>/config."""
-    return sorted(
+    """Project overlays in <router root>/config and in the user config's projects/."""
+    names = {
         path.stem.lower()
         for path in (_router_root() / "config").glob("*.toml")
-        if path.stem != "default"
-    )
+        if path.stem not in {"default", "local"}
+    }
+    names.update(path.stem.lower() for path in (user_config_dir() / "projects").glob("*.toml"))
+    return sorted(names)
+
+
+def effective_project(selected: str) -> str:
+    """The project a command routes for: --project if given, else the resolved config's."""
+    return clean_text(selected or ROUTER_CONFIG.project_name).lower()
 
 
 def policy_pack_for(project: str) -> dict[str, Any]:
     """Load the optional declarative policy pack for a project.
 
-    Policy packs live at ``<router root>/policies/<project>.json`` and carry
+    Policy packs live at ``<user config>/policies/<project>.json`` or, failing
+    that, ``<router root>/policies/<project>.json``, and carry
     project-specific bundle rules (deny lists, required context capabilities)
     that used to be hardcoded. A missing pack means "no extra policy"; a
     malformed one is a hard error rather than silent fallback.
@@ -5223,7 +5241,9 @@ def policy_pack_for(project: str) -> dict[str, Any]:
     name = clean_text(project).lower()
     if not name:
         return {}
-    pack_path = _router_root() / "policies" / f"{name}.json"
+    pack_path = user_config_dir() / "policies" / f"{name}.json"
+    if not pack_path.is_file():
+        pack_path = _router_root() / "policies" / f"{name}.json"
     if not pack_path.is_file():
         return {}
     try:
@@ -7021,7 +7041,7 @@ def _route_hook(argv: list[str]) -> int:
         return 0
     import route_hook
 
-    return route_hook.run(argv, ROUTER_CONFIG.output_dir, selected_project or "")
+    return route_hook.run(argv, ROUTER_CONFIG.output_dir, effective_project(selected_project))
 
 
 def _main() -> int:
@@ -7065,7 +7085,7 @@ def _main() -> int:
     args = parser.parse_args(argv)
     if args.command == "route":
         args.command = "bundle"  # friendly alias
-    args.project = selected_project
+    args.project = effective_project(selected_project)
     output = args.output.expanduser().resolve(strict=False)
     try:
         if args.command == "rebuild":

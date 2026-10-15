@@ -179,7 +179,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         selection = None  # bind everything found
 
     roots = selected_skill_roots(selection)
-    local_path = _repo_root() / "config" / "local.toml"
+    local_path = _bindings_path()
     surface_line = f"surface_roots = [{', '.join(_toml_str(p) for p in _surface_candidates())}]"
     roots_line = "extra_skill_roots = [" + ", ".join(_toml_str(r) for r in roots) + "]"
     try:
@@ -289,6 +289,17 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _bindings_path() -> Path:
+    """Where `init` writes machine bindings: config/local.toml in a checkout, else the
+    user config.toml (a pip/pipx install has no config/ beside its modules)."""
+    config_dir = _repo_root() / "config"
+    if config_dir.is_dir():
+        return config_dir / "local.toml"
+    from router_config import user_config_dir
+
+    return user_config_dir() / "config.toml"
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     harnesses = detect_harnesses()
     print("lockkeeper doctor")
@@ -330,10 +341,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("")
         print(f"registry: not built yet at {output_dir} — run `lockkeeper snapshot-runtimes && lockkeeper rebuild`")
 
-    local_config = _repo_root() / "config" / "local.toml"
+    local_config = _bindings_path()
     print("")
     if local_config.is_file():
-        print("binding: config/local.toml present (machine-local)")
+        print(f"binding: {local_config} present (machine-local)")
     else:
         print("binding: none yet — run `lockkeeper init` to bind detected harnesses")
     try:
