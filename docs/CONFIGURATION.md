@@ -207,6 +207,37 @@ description = "German statutes and case law: BGB, HGB, GmbHG, StGB, ZPO."
 A routed corpus lists its best-matching entries as `resources`, and
 `lockkeeper search --corpus german-law "Widerruf Fernabsatz"` searches inside it.
 
+## Deployment vocabulary
+
+Names and paths that differ per machine go under `[extensions]` in any config layer,
+so you never need to edit the router to fit your library:
+
+```toml
+[extensions]
+# Plugin-shaped skill bundles whose entry document is <plugin>/<plugin><suffix>.
+entrypoint_suffixes = ["-guide.md"]
+# Folders the skill walk never enters (fnmatch on the full path), minus kept names.
+# Use it for leaf collections far too large to index one by one.
+skip_skill_dirs = ["*/statutes/*/skills/*"]
+skip_skill_keep = ["contract-review"]
+# Symlinked skills that `link` must keep in place besides the router's own.
+auto_discovery_keep = ["graph-builder"]
+# Every Hermes profile must declare these MCP servers (`check` reports a gap).
+required_memory_mcp = ["notes", "lessons"]
+
+# Exact-name choices for these skills accept only this SKILL.md (no shadow copies).
+[extensions.pinned_skill_paths]
+voice-pass = "~/.agents/skills/voice-pass/SKILL.md"
+
+# Descriptions for MCP servers that ship none; they feed ranking.
+[extensions.mcp_descriptions]
+notes = "Team decision log and project context."
+```
+
+A policy-pack `prefer` rule with `"first": true` keeps only the first choice that is
+added, which lets a rule name a capability and its fallback (an MCP server that only
+one agent has, then web search).
+
 ## Windows
 
 macOS, Linux and Windows are all covered by CI. See [windows.md](windows.md) for the

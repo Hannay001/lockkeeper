@@ -17,6 +17,7 @@ except ImportError:  # Windows: no fcntl; best-effort exclusive lock via msvcrt
         msvcrt.locking(file_handle.fileno(), msvcrt.LK_LOCK, 1)
 
 
+import fnmatch
 import hashlib
 import heapq
 import io
@@ -163,6 +164,31 @@ RESOURCE_CORPORA: tuple[ResourceCorpus, ...] = ()
 # fills it at import, so it must be defined before that call, never after.
 LEGACY_MCP_NAMES: frozenset[str] = frozenset()
 RESOURCE_TOP_K = 5
+# Deployment vocabulary. configure_router() (run at import, below) fills these
+# from [extensions], so every default must be defined before that call.
+DEFAULT_MCP_DESCRIPTIONS = {
+    "context7": "Current library and SDK documentation.",
+    "filesystem": "Structured filesystem operations.",
+    "playwright": "Browser automation and page inspection.",
+    "sequential-thinking": "Structured multi-step reasoning tool.",
+    "serena": "Language-server-backed code intelligence.",
+    "linear": "Linear issue and project operations.",
+    "linear-server": "Linear issue and project operations.",
+}
+MCP_DESCRIPTIONS: dict[str, str] = dict(DEFAULT_MCP_DESCRIPTIONS)
+# The router's own skill is always kept; extensions.auto_discovery_keep adds names.
+AUTO_DISCOVERY_KEEP: frozenset[str] = frozenset({"capability-router"})
+# extensions.pinned_skill_paths: the only SKILL.md that may satisfy an exact-name
+# choice for that name (guards against shadow copies).
+PINNED_SKILL_PATHS: dict[str, Path] = {}
+# extensions.entrypoint_suffixes: entry-document suffixes for plugin-shaped skill
+# bundles, e.g. "-guide.md" for <plugin>/<plugin>-guide.md. ENTRYPOINT_FALLBACKS
+# apply after them.
+ENTRYPOINT_SUFFIXES: tuple[str, ...] = ()
+# extensions.skip_skill_dirs: fnmatch patterns for folders the skill walk never
+# enters (large leaf corpora); extensions.skip_skill_keep names folders exempt.
+SKIP_SKILL_DIR_PATTERNS: tuple[str, ...] = ()
+SKIP_SKILL_KEEP: frozenset[str] = frozenset()
 
 
 def parse_resource_corpora(raw: Any) -> tuple[ResourceCorpus, ...]:
@@ -204,6 +230,55 @@ def parse_resource_corpora(raw: Any) -> tuple[ResourceCorpus, ...]:
             )
         )
     return tuple(corpora)
+
+
+def _string_list(config: RouterConfig, key: str) -> list[str]:
+    value = config.get_extension(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise RouterConfigError(f"config extensions.{key} must be a list of strings")
+    return value
+
+
+def _string_table(config: RouterConfig, key: str) -> dict[str, str]:
+    value = config.get_extension(key, {})
+    if not isinstance(value, dict) or not all(isinstance(item, str) for item in value.values()):
+        raise RouterConfigError(f"config extensions.{key} must be a table of name = \"text\" entries")
+    return {str(name).lower(): item for name, item in value.items()}
+
+
+def _configure_vocabulary(config: RouterConfig) -> None:
+    """Apply the per-deployment names and paths from [extensions]."""
+    global MCP_DESCRIPTIONS, AUTO_DISCOVERY_KEEP, PINNED_SKILL_PATHS, ENTRYPOINT_SUFFIXES
+    global SKIP_SKILL_DIR_PATTERNS, SKIP_SKILL_KEEP
+    MCP_DESCRIPTIONS = {**DEFAULT_MCP_DESCRIPTIONS, **_string_table(config, "mcp_descriptions")}
+    AUTO_DISCOVERY_KEEP = frozenset(
+        {"capability-router", *(name.lower() for name in _string_list(config, "auto_discovery_keep"))}
+    )
+    PINNED_SKILL_PATHS = {
+        name: Path(os.path.expanduser(path)) for name, path in _string_table(config, "pinned_skill_paths").items()
+    }
+    suffixes = _string_list(config, "entrypoint_suffixes")
+    for suffix in suffixes:
+        if "/" in suffix or "\\" in suffix or ".." in suffix or not suffix.endswith(".md"):
+            raise RouterConfigError(
+                f"config extensions.entrypoint_suffixes entry {suffix!r} must be a plain *.md filename suffix"
+            )
+    ENTRYPOINT_SUFFIXES = tuple(suffixes)
+    SKIP_SKILL_DIR_PATTERNS = tuple(_string_list(config, "skip_skill_dirs"))
+    SKIP_SKILL_KEEP = frozenset(name.lower() for name in _string_list(config, "skip_skill_keep"))
+    required = config.get_extension("required_memory_mcp")
+    if required is not None and not isinstance(required, str) and not (
+        isinstance(required, list) and all(isinstance(item, str) for item in required)
+    ):
+        raise RouterConfigError("config extensions.required_memory_mcp must be a name or a list of names")
+
+
+def required_memory_mcps() -> tuple[str, ...]:
+    """MCP servers every configured Hermes profile must declare (extensions.required_memory_mcp)."""
+    value = ROUTER_CONFIG.get_extension("required_memory_mcp")
+    if isinstance(value, str):
+        return (value,) if value else ()
+    return tuple(value or ())
 
 
 def configure_router(config: RouterConfig, *, verified_startup: bool = False) -> None:
@@ -259,6 +334,7 @@ def configure_router(config: RouterConfig, *, verified_startup: bool = False) ->
         HERMES_SHARED_SURFACE = DEFAULT_HERMES_SHARED_SURFACE
     global RESOURCE_CORPORA
     RESOURCE_CORPORA = parse_resource_corpora(config.get_extension("resource_corpora", []))
+    _configure_vocabulary(config)
     HERMES_SHARED_SURFACE_ROOT = config.hermes_shared_surface_root
     PROJECT_CATALOG = config.catalog_path
     _bootstrap_seed_snapshots(config)
@@ -370,7 +446,6 @@ PROJECT_CATALOG_START = "<!-- GENERATED-SKILL-CATALOG:START -->"
 PROJECT_CATALOG_END = "<!-- GENERATED-SKILL-CATALOG:END -->"
 MAX_SHARD_RECORDS = 1_000
 DESCRIPTION = "Build and query a cross-harness, progressively disclosed capability registry."
-AUTO_DISCOVERY_KEEP = {"capability-router"}
 AUTO_REFRESH_LOCK_NAME = ".capability-router-refresh.lock"
 AUTO_REFRESHABLE_STALENESS = (
     "Registry missing at ",
@@ -388,10 +463,6 @@ AUTO_REFRESHABLE_STALENESS = (
     # harness snapshot.
     "Registry format is outdated:",
 )
-# Optional per-deployment pinning: map a capability name to the only SKILL.md
-# path that may satisfy an exact-name choice (guards against shadow copies).
-# Populate via a policy pack or by extending this mapping downstream.
-PINNED_SKILL_PATHS: dict[str, Path] = {}
 
 SKIP_DIRS = {
     ".git",
@@ -577,15 +648,6 @@ BUILTIN_TOOLS = [
     ("mcp_resources", "List and read configured MCP resources."),
 ]
 
-MCP_DESCRIPTIONS = {
-    "context7": "Current library and SDK documentation.",
-    "filesystem": "Structured filesystem operations.",
-    "playwright": "Browser automation and page inspection.",
-    "sequential-thinking": "Structured multi-step reasoning tool.",
-    "serena": "Language-server-backed code intelligence.",
-    "linear": "Linear issue and project operations.",
-    "linear-server": "Linear issue and project operations.",
-}
 
 GENERIC_QUERY_TERMS = {
     "a",
@@ -1023,6 +1085,19 @@ def parse_frontmatter(path: Path) -> tuple[str, str]:
     )
 
 
+@lru_cache(maxsize=None)
+def _category_term_pattern(term: str) -> "re.Pattern[str]":
+    """Short alphanumeric terms ("tam", "api", "pdf") must match as whole words.
+
+    As substrings they matched inside unrelated words ("tam" in "datamodel"),
+    which filed capabilities under the wrong category. Plurals still match.
+    """
+    escaped = re.escape(term)
+    if len(term) <= 4 and term.isalnum():
+        return re.compile(rf"\b{escaped}(?:s|es)?\b")
+    return re.compile(escaped)
+
+
 def category_for(name: str, description: str, source_path: str, capability_type: str) -> str:
     text = f"{name} {description} {source_path}".lower()
     if "/persona/" in text or "/personas/" in text:
@@ -1032,16 +1107,19 @@ def category_for(name: str, description: str, source_path: str, capability_type:
     best_slug = "specialized-other"
     best_score = 0
     lowered_name = name.lower()
+    lowered_description = description.lower()
+    lowered_source = source_path.lower()
     for category in CATEGORIES[:-1]:
         score = 0
         for term in category["terms"]:
+            pattern = _category_term_pattern(term)
             if lowered_name == term:
                 score += 30
-            elif term in lowered_name:
+            elif pattern.search(lowered_name):
                 score += 14
-            elif term in description.lower():
+            elif pattern.search(lowered_description):
                 score += 6
-            elif term in source_path.lower():
+            elif pattern.search(lowered_source):
                 score += 2
         if score > best_score:
             best_slug = category["slug"]
@@ -1349,6 +1427,18 @@ def hermes_shared_surface_link_preflight_errors(
     return errors
 
 
+def _skip_skill_dir(candidate: Path) -> bool:
+    """True when extensions.skip_skill_dirs excludes this folder from the walk.
+
+    Pruning the descent, not filtering the yield, is the point: a corpus of tens of
+    thousands of leaves costs a stat per folder on every rebuild otherwise.
+    """
+    if not SKIP_SKILL_DIR_PATTERNS or candidate.name.lower() in SKIP_SKILL_KEEP:
+        return False
+    rendered = candidate.as_posix()
+    return any(fnmatch.fnmatchcase(rendered, pattern) for pattern in SKIP_SKILL_DIR_PATTERNS)
+
+
 def iter_skill_entries(root: Path) -> Iterable[Path]:
     if not root.is_dir():
         return
@@ -1358,6 +1448,8 @@ def iter_skill_entries(root: Path) -> Iterable[Path]:
         for dirname in dirnames:
             candidate = current / dirname
             if dirname in SKIP_DIRS or dirname.startswith("."):
+                continue
+            if _skip_skill_dir(candidate):
                 continue
             if candidate.is_symlink():
                 direct = candidate / "SKILL.md"
@@ -1887,10 +1979,6 @@ def denied_mcp_server_names() -> set[str]:
 
 # Plugin-shaped bundles that live under a *skills* root instead of a plugin cache.
 # discover_plugins() only scans PLUGIN_CACHE_ROOTS, so these are invisible to it.
-# Optional per-deployment entry-point document suffixes for plugin-shaped skill
-# bundles; empty by default so only ENTRYPOINT_FALLBACKS apply. Populate for a
-# corpus that ships named entry documents instead of READMEs.
-ENTRYPOINT_SUFFIXES: tuple[str, ...] = ()
 ENTRYPOINT_FALLBACKS = ("README.md",)
 
 
@@ -5551,16 +5639,27 @@ def bundle(
         lane = str(prefer_rule.get("lane", "primary"))
         if not isinstance(pattern, str) or not re.search(pattern, normalized):
             continue
+        # "first": true stops at the first choice that ends up in the bundle (it
+        # resolves for this runtime and is not denied, or was already selected), so a
+        # rule can name a capability and its fallback.
+        first_only = prefer_rule.get("first") is True
         for choice in prefer_rule.get("choose", []):
             if isinstance(choice, dict) and len(choice) == 1:
                 (key, value), = choice.items()
                 record_type = None if key == "tool" else key
+                resolved = choose([str(value)], {record_type} if record_type else None)
                 add(
-                    choose([str(value)], {record_type} if record_type else None),
+                    resolved,
                     lane,
                     str(prefer_rule.get("why", "Policy-pack preferred capability.")),
                     score=1.0,
                 )
+                # Satisfied when the choice is in the bundle now, including when an
+                # earlier lane already selected it (add() de-duplicates silently).
+                if first_only and resolved is not None and any(
+                    item["semantic_key"] == semantic_key_for(resolved) for item in selected
+                ):
+                    break
 
     enabled_routes = set(pack.get("enable_routes", []))
 
@@ -6258,7 +6357,8 @@ def plan_auto_discovery_prune(
         if not root.is_dir():
             continue
         for child in sorted(root.iterdir(), key=lambda path: path.name.lower()):
-            if not child.is_symlink() or child.name in AUTO_DISCOVERY_KEEP:
+            # AUTO_DISCOVERY_KEEP holds lower-cased names; compare the same way.
+            if not child.is_symlink() or child.name.lower() in AUTO_DISCOVERY_KEEP:
                 continue
             target = child.resolve(strict=False)
             skill_file = target if target.name == "SKILL.md" else target / "SKILL.md"
@@ -6406,9 +6506,11 @@ def check_links(output: Path) -> list[str]:
         if not re.search(r"(?m)^\s*user_profile_enabled:\s*false\s*$", profile_config):
             errors.append(f"{profile / 'config.yaml'} does not disable Hermes user-profile injection")
         durable_memory_servers = yaml_mapping_names(yaml_top_level_block(profile_config, "mcp_servers"))
-        required_memory_server = ROUTER_CONFIG.get_extension("required_memory_mcp")
-        if required_memory_server and required_memory_server not in durable_memory_servers:
-            errors.append(f"{profile / 'config.yaml'} does not configure the required memory MCP")
+        for required_memory_server in required_memory_mcps():
+            if required_memory_server not in durable_memory_servers:
+                errors.append(
+                    f"{profile / 'config.yaml'} does not configure the required memory MCP {required_memory_server}"
+                )
     project_links = {ROUTER_CONFIG.snapshot_dir / "system": output.resolve(strict=False)}
     project_links.update(
         {root / "Capabilities.md": index for root in ROUTER_CONFIG.surface_roots}
