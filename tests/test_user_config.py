@@ -109,15 +109,19 @@ class UserConfigDirectoryTest(UserConfigFixture):
 
 class UserProjectOverlayTest(UserConfigFixture):
     def test_a_user_project_overlay_can_be_selected(self) -> None:
-        self.user("projects/lab.toml", '[project]\nname = "lab"\ncwd = "/lab"\n')
+        # Absolute temp paths: on Windows a drive-less "/lab" resolves against the
+        # config file's drive, which need not be the test runner's.
+        lab = self.work / "lab"
+        self.user("projects/lab.toml", f'[project]\nname = "lab"\ncwd = "{lab.as_posix()}"\n')
         config = self.load(project="lab")
         self.assertEqual(config.project_name, "lab")
-        self.assertEqual(config.cwd, Path("/lab").resolve())
+        self.assertEqual(config.cwd, lab)
 
     def test_a_user_project_shadows_a_repository_project_of_the_same_name(self) -> None:
-        self.repo("lab.toml", '[project]\nname = "lab"\ncwd = "/repo-lab"\n')
-        self.user("projects/lab.toml", '[project]\nname = "lab"\ncwd = "/user-lab"\n')
-        self.assertEqual(self.load(project="lab").cwd, Path("/user-lab").resolve())
+        repo_lab, user_lab = self.work / "repo-lab", self.work / "user-lab"
+        self.repo("lab.toml", f'[project]\nname = "lab"\ncwd = "{repo_lab.as_posix()}"\n')
+        self.user("projects/lab.toml", f'[project]\nname = "lab"\ncwd = "{user_lab.as_posix()}"\n')
+        self.assertEqual(self.load(project="lab").cwd, user_lab)
 
     def test_available_projects_lists_both_locations(self) -> None:
         self.repo("shared.toml", '[project]\nname = "shared"\n')
