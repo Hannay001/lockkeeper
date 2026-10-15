@@ -3,6 +3,12 @@
 The router deliberately keeps routing policy and domain data in code.  This module
 only resolves the filesystem and project-boundary values that must move with a
 standalone installation.
+
+Layers, lowest first: built-ins, the checkout's config/default.toml and
+config/local.toml, the per-user config.toml (see user_config_dir()), the selected
+project overlay, then $CAPABILITY_ROUTER_CONFIG. A project is selected by
+--project, else by the deepest [project_roots] entry containing the working
+directory, else by default_project.
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ class RouterConfigError(RuntimeError):
 
 
 TOP_LEVEL_SCALAR_KEYS = {"output_dir", "claude_json_path", "default_project", "bundle_size"}
+USER_CONFIG_DIR_ENV = "LOCKKEEPER_CONFIG_DIR"
 
 # How many capabilities a routed bundle holds unless a caller asks for another size.
 DEFAULT_BUNDLE_SIZE = 10
@@ -61,6 +68,8 @@ class RouterConfig:
     active_config_paths: tuple[Path, ...]
     extensions: tuple[tuple[str, Any], ...] = ()
     bundle_size: int = DEFAULT_BUNDLE_SIZE
+    # (project name, directory) pairs from [project_roots], in declaration order.
+    project_roots: tuple[tuple[str, Path], ...] = ()
 
     def get_extension(self, key: str, default: Any = None) -> Any:
         return dict(self.extensions).get(key, default)
@@ -69,6 +78,28 @@ class RouterConfig:
     def source_paths(self) -> tuple[Path, ...]:
         """Compatibility-friendly name for the files active in this resolution."""
         return self.active_config_paths
+
+
+def user_config_dir(environ: Mapping[str, str] = os.environ) -> Path:
+    """Per-user config home: $LOCKKEEPER_CONFIG_DIR, $XDG_CONFIG_HOME/lockkeeper, ~/.config/lockkeeper.
+
+    Holds config.toml, projects/<name>.toml and policies/<name>.json, so an installed
+    Lockkeeper (no writable checkout) can still carry personal settings.
+    """
+    explicit = environ.get(USER_CONFIG_DIR_ENV, "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve(strict=False)
+    xdg = environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return (base / "lockkeeper").resolve(strict=False)
+
+
+def project_overlay_path(root: Path, project_name: str) -> Path:
+    """The user overlay for a project if one exists, else the checkout's config/<name>.toml."""
+    user_path = user_config_dir() / "projects" / f"{project_name}.toml"
+    if user_path.is_file():
+        return user_path
+    return (root / "config" / f"{project_name}.toml").resolve(strict=False)
 
 
 def _router_root(script_path: Path | None) -> Path:
@@ -180,7 +211,7 @@ def _table(data: Mapping[str, Any], path: Path, field: str) -> Mapping[str, Any]
 def _validate_keys(data: Mapping[str, Any], path: Path) -> None:
     """Allow only the explicit future-extension namespace beyond structural fields."""
     for key, value in data.items():
-        if key in {"project", "hermes"}:
+        if key in {"project", "hermes", "project_roots"}:
             continue
         if key == "extensions":
             if not isinstance(value, dict):
@@ -239,11 +270,46 @@ def _apply_overlay(config: RouterConfig, data: Mapping[str, Any], path: Path) ->
             hermes["shared_surface_root"], path, "hermes.shared_surface_root"
         )
 
+    if "project_roots" in data:
+        values["project_roots"] = _merge_project_roots(config.project_roots, data, path)
+
     source_paths = tuple(dict.fromkeys((*config.active_config_paths, path)))
     merged_extensions = {**dict(config.extensions), **data.get("extensions", {})}
     if merged_extensions:
         values["extensions"] = tuple(sorted(merged_extensions.items()))
     return replace(config, active_config_paths=source_paths, **values)
+
+
+def _merge_project_roots(
+    current: tuple[tuple[str, Path], ...], data: Mapping[str, Any], path: Path
+) -> tuple[tuple[str, Path], ...]:
+    """A later layer replaces a project's roots; other projects' roots are kept."""
+    table = _table(data, path, "project_roots")
+    replaced: dict[str, tuple[Path, ...]] = {}
+    for raw_name, value in table.items():
+        name = _normalise_project_name(str(raw_name))
+        field = f"project_roots.{raw_name}"
+        if isinstance(value, str):
+            replaced[name] = (_path(value, path, field),)
+        elif isinstance(value, list):
+            replaced[name] = _path_list(value, path, field)
+        else:
+            raise _config_error(path, f"{field} must be a path or an array of paths")
+    kept = tuple(item for item in current if item[0] not in replaced)
+    added = tuple((name, root) for name, roots in replaced.items() for root in roots)
+    return kept + added
+
+
+def project_for_directory(config: RouterConfig, directory: Path) -> str:
+    """The project whose deepest [project_roots] entry contains directory, or ""."""
+    target = directory.expanduser().resolve(strict=False)
+    best_name, best_depth = "", -1
+    for name, root in config.project_roots:
+        if target == root or root in target.parents:
+            depth = len(root.parts)
+            if depth > best_depth:
+                best_name, best_depth = name, depth
+    return best_name
 
 
 def _normalise_project_name(project_name: str) -> str:
@@ -285,8 +351,10 @@ def load_router_config(
     script_path: Path | None = None,
     include_repository: bool = True,
     include_explicit: bool = True,
+    include_user: bool = True,
+    cwd: Path | None = None,
 ) -> RouterConfig:
-    """Resolve built-ins, repository defaults, an optional project, then an env file."""
+    """Resolve built-ins, repository defaults, user config, an optional project, then an env file."""
     selected_project = _normalise_project_name(project_name)
     root = _router_root(script_path)
     config = _builtin_config(script_path)
@@ -304,11 +372,27 @@ def load_router_config(
     if include_repository and local_path.is_file():
         config = _apply_overlay(config, _read_toml(local_path, required=True), local_path)
 
-    resolved_project = selected_project or default_project
+    # Per-user settings sit above the checkout's files: they are what an installed
+    # Lockkeeper has instead of a writable config/ directory.
+    user_path = user_config_dir() / "config.toml"
+    if include_user and user_path.is_file():
+        user_data = _read_toml(user_path, required=True)
+        config = _apply_overlay(config, user_data, user_path)
+        default_project = _default_project(user_data, user_path) or default_project
+
+    directory_project = ""
+    if not selected_project and config.project_roots:
+        directory_project = project_for_directory(config, cwd or Path.cwd())
+    resolved_project = selected_project or directory_project or default_project
     if resolved_project:
         if not include_repository:
             raise RouterConfigError("Project selection requires repository configuration sources")
-        project_path = (root / "config" / f"{resolved_project}.toml").resolve(strict=False)
+        project_path = project_overlay_path(root, resolved_project)
+        if directory_project and not project_path.is_file():
+            raise RouterConfigError(
+                f"project_roots names {resolved_project!r}, but no projects/{resolved_project}.toml "
+                f"or config/{resolved_project}.toml exists"
+            )
         project_data = _read_toml(project_path, required=True)
         _validate_selected_project(project_data, project_path, resolved_project, require_name=True)
         config = _apply_overlay(config, project_data, project_path)

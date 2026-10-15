@@ -49,10 +49,44 @@ size never triggers a re-index.
 Structural paths come from `config/default.toml`. Add per-project overlays as
 `config/<name>.toml` and select them with `--project <name>`. Machine-local bindings
 (created by `./install.sh` or `lockkeeper init`) live in `config/local.toml`, which is
-git-ignored.
+git-ignored; an installed copy has no checkout, so `init` writes them to the user
+`config.toml` described below.
 
 Project routing policy lives in declarative policy packs: deny lists and required
 lanes. See [policies/example.json](../policies/example.json).
+
+### Your own settings (pip and pipx installs)
+
+An installed Lockkeeper has no checkout to edit, so personal settings live in a user
+config directory: `$LOCKKEEPER_CONFIG_DIR` if set, else `$XDG_CONFIG_HOME/lockkeeper`,
+else `~/.config/lockkeeper`.
+
+```
+~/.config/lockkeeper/
+  config.toml            # same keys as config/local.toml; wins over it
+  projects/<name>.toml   # project overlays; wins over config/<name>.toml
+  policies/<name>.json   # policy packs; wins over policies/<name>.json
+```
+
+Relative paths in these files resolve against the file's own directory. Editing any
+of them re-indexes on the next query, like the checkout's config files.
+
+### Choosing a project by working directory
+
+Instead of passing `--project` or setting one `default_project` for everything, map
+directories to projects in any config layer:
+
+```toml
+[project_roots]
+lab = "~/work/lab"
+notebooks = ["~/work/lab/notebooks", "~/scratch/notebooks"]
+```
+
+`--project` wins when given. Otherwise the project whose deepest root contains the
+current directory is used (for the prompt hook, the directory the agent runs in), and
+outside every root `default_project` applies. A root that names a project with no
+overlay file is a configuration error. The selected project also picks its policy
+pack, including one chosen by `default_project`.
 
 Runtime inventory is written to a machine-local state directory
 (`~/.local/state/cap/`), never into your clone. The copies under `data/snapshots/` are
