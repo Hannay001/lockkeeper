@@ -111,6 +111,31 @@ class AutoDiscoveryKeepTest(VocabularyFixture):
         self.use()
         self.assertEqual(registry.AUTO_DISCOVERY_KEEP, frozenset({"capability-router"}))
 
+    def test_a_kept_link_is_not_pruned_whatever_its_casing(self) -> None:
+        home = self.temp / "home"
+        skills = home / ".agents" / "skills"
+        target = skills / "real-source"
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text("---\nname: real-source\n---\n", encoding="utf-8")
+        for name in ("Graph-Builder", "stray-link"):
+            try:
+                (skills / name).symlink_to(target, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlinks are not available in this environment")
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+            # Skill roots are derived from the home directory when configuring.
+            registry.configure_router(
+                replace(
+                    self.original,
+                    hermes_shared_surface_root=self.temp / "hermes-shared",
+                    extensions=(("auto_discovery_keep", ["Graph-Builder"]),),
+                )
+            )
+            _archived, planned = registry.plan_auto_discovery_prune(self.temp / "archive.json")
+        names = {link.name for link, _row, _stat in planned}
+        self.assertNotIn("Graph-Builder", names)
+        self.assertIn("stray-link", names)
+
 
 class McpDescriptionTest(VocabularyFixture):
     def test_configured_descriptions_extend_the_built_ins(self) -> None:
@@ -186,20 +211,20 @@ class CategoryWordBoundaryTest(unittest.TestCase):
 
 
 class PreferFirstTest(VocabularyFixture):
-    def bundle(self, rule: dict) -> list[str]:
+    def bundle(self, rule: dict, pack: dict | None = None, lanes: tuple[str, ...] | None = ("integration",)) -> list[str]:
         records = [
             record("contracts-workshop", "draft and review commercial contracts"),
             record("legal-search", "search statutes", record_type="mcp"),
             record("web", "search the web", record_type="tool"),
         ]
         with (
-            mock.patch.object(registry, "policy_pack_for", return_value={"prefer": [rule]}),
+            mock.patch.object(registry, "policy_pack_for", return_value=pack or {"prefer": [rule]}),
             mock.patch.object(registry, "semantic_hits", return_value={}),
             mock.patch.object(registry, "load_aliases", return_value={}),
             mock.patch.object(registry, "registry_manifest_fingerprint", return_value="fp"),
         ):
             result = registry.bundle(records, "draft a contract", "claude", "lab", 8, self.temp)
-        return [item["name"] for item in result["bundle"] if item["lane"] == "integration"]
+        return [item["name"] for item in result["bundle"] if lanes is None or item["lane"] in lanes]
 
     def test_first_adds_only_the_first_choice_that_resolves(self) -> None:
         rule = {
@@ -209,6 +234,16 @@ class PreferFirstTest(VocabularyFixture):
             "choose": [{"mcp": "missing-server"}, {"mcp": "legal-search"}, {"tool": "web"}],
         }
         self.assertEqual(self.bundle(rule), ["legal-search"])
+
+    def test_first_is_satisfied_by_a_choice_selected_earlier(self) -> None:
+        # The preferred capability is already in the bundle (here via a required
+        # context lane); its fallback must not be added on top.
+        rule = {"match": "contract", "lane": "integration", "first": True,
+                "choose": [{"mcp": "legal-search"}, {"tool": "web"}]}
+        pack = {"prefer": [rule], "require_context": [{"choose": [{"mcp": "legal-search"}], "required": True}]}
+        names = self.bundle(rule, pack=pack, lanes=None)
+        self.assertIn("legal-search", names)
+        self.assertNotIn("web", names)
 
     def test_without_first_every_resolving_choice_is_added(self) -> None:
         rule = {"match": "contract", "lane": "integration", "choose": [{"mcp": "legal-search"}, {"tool": "web"}]}

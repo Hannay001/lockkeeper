@@ -5639,21 +5639,26 @@ def bundle(
         lane = str(prefer_rule.get("lane", "primary"))
         if not isinstance(pattern, str) or not re.search(pattern, normalized):
             continue
-        # "first": true keeps only the first choice that is added (resolves for this
-        # runtime and is not denied), so a rule can name a capability and its fallback.
+        # "first": true stops at the first choice that ends up in the bundle (it
+        # resolves for this runtime and is not denied, or was already selected), so a
+        # rule can name a capability and its fallback.
         first_only = prefer_rule.get("first") is True
         for choice in prefer_rule.get("choose", []):
             if isinstance(choice, dict) and len(choice) == 1:
                 (key, value), = choice.items()
                 record_type = None if key == "tool" else key
-                before = len(selected)
+                resolved = choose([str(value)], {record_type} if record_type else None)
                 add(
-                    choose([str(value)], {record_type} if record_type else None),
+                    resolved,
                     lane,
                     str(prefer_rule.get("why", "Policy-pack preferred capability.")),
                     score=1.0,
                 )
-                if first_only and len(selected) > before:
+                # Satisfied when the choice is in the bundle now, including when an
+                # earlier lane already selected it (add() de-duplicates silently).
+                if first_only and resolved is not None and any(
+                    item["semantic_key"] == semantic_key_for(resolved) for item in selected
+                ):
                     break
 
     enabled_routes = set(pack.get("enable_routes", []))
@@ -6352,7 +6357,8 @@ def plan_auto_discovery_prune(
         if not root.is_dir():
             continue
         for child in sorted(root.iterdir(), key=lambda path: path.name.lower()):
-            if not child.is_symlink() or child.name in AUTO_DISCOVERY_KEEP:
+            # AUTO_DISCOVERY_KEEP holds lower-cased names; compare the same way.
+            if not child.is_symlink() or child.name.lower() in AUTO_DISCOVERY_KEEP:
                 continue
             target = child.resolve(strict=False)
             skill_file = target if target.name == "SKILL.md" else target / "SKILL.md"
