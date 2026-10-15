@@ -39,7 +39,7 @@
       ],
       "lane": "context",
       "why": "Prefer live library documentation.",
-      "_doc": "Regex on the task text; matching adds the chosen capability to the lane with a score boost."
+      "_doc": "Regex on the task text; matching adds the chosen capabilities to the lane with a score boost. Add \"first\": true to keep only the first choice that is added (a preferred capability, then its fallback)."
     }
   ],
   "enable_routes": [],
