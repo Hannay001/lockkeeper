@@ -33,6 +33,14 @@ class DistributionTest(unittest.TestCase):
             (ROOT / "skills" / "capability-router" / "SKILL.md").read_bytes(),
         )
 
+    def test_the_router_skill_is_named_after_its_folder(self) -> None:
+        # Agents list a skill by its frontmatter name, while the folder name is what
+        # Lockkeeper keeps linked (AUTO_DISCOVERY_KEEP) and what `npx skills` installs.
+        for skill in (ROOT / "skills" / "capability-router", PLUGIN / "skills" / "capability-router"):
+            frontmatter = (skill / "SKILL.md").read_text(encoding="utf-8").split("---")[1]
+            names = [line.split(":", 1)[1].strip() for line in frontmatter.splitlines() if line.startswith("name:")]
+            self.assertEqual(names, [skill.name], str(skill))
+
     def test_the_plugin_routes_prompts_and_serves_mcp(self) -> None:
         hook = load(PLUGIN / "hooks" / "hooks.json")["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         self.assertIn("lockkeeper route-hook", hook)
