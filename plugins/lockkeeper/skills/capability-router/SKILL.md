@@ -1,5 +1,5 @@
 ---
-name: cap-router
+name: capability-router
 description: Select a bounded portfolio of complementary skills, MCPs, plugins, tools, agents, and commands without loading the full system catalog.
 ---
 
